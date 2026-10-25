@@ -900,8 +900,21 @@ def build_efi(plan, out_dir, cache, ssdt_dir=None, usb_map=None, validate=True):
                     acpi_add = [x for x in acpi_add if x["Path"] != a["Path"]] + [a]
             log("  merged %d ACPI patches from patches_OC.plist" % len(acpi_patch))
     for name in plan["ssdts"]:                 # prebuilt Dortania SSDTs for anything not generated
-        if covered and ssdt_kinds(name) & covered:
-            continue
+        kinds = ssdt_kinds(name)
+        if covered and kinds & covered:
+            if kinds <= covered:
+                continue
+            # Partly generated (e.g. SSDTTime made SSDT-USBX but found no LPC bridge for SSDT-EC):
+            # use the prebuilt variant without the generated part, never drop the missing device.
+            sub = name
+            if "USBX" in covered:
+                sub = sub.replace("-USBX", "")
+            if ssdt_kinds(sub) & covered or sub == name:
+                W.append("%s only partly generated (%s missing) - add it manually"
+                         % (name, ", ".join(sorted(kinds - covered))))
+                continue
+            log("  %s: %s was generated, using prebuilt %s for the rest" % (name, "/".join(sorted(kinds & covered)), sub))
+            name = sub
         src = cache.path("ssdt:" + name)
         if not src:
             W.append("SSDT %s missing from cache - skipped" % name)

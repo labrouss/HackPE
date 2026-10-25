@@ -130,22 +130,41 @@ def main():
           os.path.getsize(os.path.join(stick, "EFI", "BOOT", "BOOTx64.efi")) > 2, "OpenCore BOOTx64.efi not overwritten")
     shutil.rmtree(media, ignore_errors=True)
 
+    iasl = a.iasl or shutil.which("iasl")
+    table_sets = []
+    if iasl:
+        # Deterministic: a synthetic DSDT shaped like a real desktop (PCI0 -> LPCB, RTC, Processor objects)
+        synth = tempfile.mkdtemp(prefix="hackpe-synth-")
+        r = subprocess.run([iasl, "-p", os.path.join(synth, "DSDT"), os.path.join(HERE, "acpi", "DSDT-desktop.dsl")],
+                           capture_output=True, text=True)
+        check(os.path.isfile(os.path.join(synth, "DSDT.aml")), "synthetic DSDT compiles")
+        table_sets.append(("synthetic desktop DSDT", synth, True))
     if a.tables:
-        print("== SSDT auto-generation on real ACPI tables (%s)" % a.tables)
-        import shutil
-        import tools
-        st = tools.prepare_ssdttime(cache)
-        if a.iasl:
-            shutil.copy2(a.iasl, os.path.join(st, "Scripts", "iasl"))
+        # Smoke test on the CI runner's own tables. They are a VM's (no LPC bridge, thousands of
+        # ACPI0007 CPUs) so SSDTTime cannot build SSDT-EC there - the EFI must still get an EC.
+        table_sets.append(("this machine's ACPI tables " + a.tables, a.tables, False))
+    if table_sets:
+        import tools as _tl
+        st = _tl.prepare_ssdttime(cache)
+        if iasl:
+            shutil.copy2(iasl, os.path.join(st, "Scripts", "iasl"))
+    for label, tables, strict in table_sets:
+        print("== SSDT auto-generation on %s" % label)
         for fx in fixtures:
             plan = hackpe.build_plan(hackpe.load_hw(os.path.join(HERE, "fixtures", fx + ".json")), "tahoe")
-            res, amls = tools.ssdt_auto(cache, plan, a.tables, log_fn=lambda m: None)
-            check("SSDT-EC.aml" in amls, "%s: SSDT-EC generated (%s)" % (fx, ", ".join(amls)))
-            if plan["laptop"]:
-                check("SSDT-PNLF.aml" in amls, "%s: SSDT-PNLF generated" % fx)
+            res, amls = _tl.ssdt_auto(cache, plan, tables, log_fn=lambda m: None)
+            if strict:
+                check("SSDT-EC.aml" in amls, "%s: SSDT-EC generated (%s)" % (fx, ", ".join(amls)))
+                if plan["laptop"]:
+                    check("SSDT-PNLF.aml" in amls, "%s: SSDT-PNLF generated" % fx)
             out = tempfile.mkdtemp(prefix="hackpe-hyb-")
             efi, _, _ = hackpe.build_efi(plan, out, cache, ssdt_dir=res, validate=False)
-            r = subprocess.run([ocv, os.path.join(efi, "OC", "config.plist")], capture_output=True, text=True)
+            cfgp = os.path.join(efi, "OC", "config.plist")
+            adds = [x["Path"] for x in plistlib.load(open(cfgp, "rb"))["ACPI"]["Add"]]
+            kinds = [hackpe.ssdt_kinds(x) for x in adds]
+            check(sum("EC" in k for k in kinds) == 1, "%s: exactly one EC SSDT in the EFI (%s)" % (fx, ", ".join(adds)))
+            check(sum("USBX" in k for k in kinds) <= 1, "%s: no duplicate USBX" % fx)
+            r = subprocess.run([ocv, cfgp], capture_output=True, text=True)
             check(r.returncode == 0 and "No issues found" in r.stdout, "%s: EFI with generated SSDTs passes ocvalidate" % fx)
             if r.returncode != 0:
                 print("        " + r.stdout.strip().replace("\n", "\n        "))
