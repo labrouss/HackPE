@@ -1,0 +1,82 @@
+{
+ "Cpu": {
+  "Name": "Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz",
+  "Manufacturer": "GenuineIntel",
+  "Cores": 6,
+  "Threads": 12,
+  "Family": 6,
+  "Model": 165,
+  "Stepping": 2
+ },
+ "System": {
+  "Manufacturer": "LENOVO",
+  "Model": "Legion 5",
+  "PCSystemType": 2,
+  "ChassisTypes": [
+   10
+  ],
+  "HasBattery": true,
+  "BoardManufacturer": "LENOVO",
+  "BoardProduct": "LNVNB161216",
+  "Firmware": "UEFI",
+  "RamGB": 16
+ },
+ "Pci": [
+  {
+   "Ven": 32902,
+   "Dev": 39876,
+   "Class": "030000",
+   "LocationPath": null
+  },
+  {
+   "Ven": 4318,
+   "Dev": 8085,
+   "Class": "030200",
+   "LocationPath": null
+  },
+  {
+   "Ven": 32902,
+   "Dev": 1776,
+   "Class": "028000",
+   "LocationPath": null
+  },
+  {
+   "Ven": 4332,
+   "Dev": 33128,
+   "Class": "020000",
+   "LocationPath": null
+  },
+  {
+   "Ven": 32902,
+   "Dev": 1736,
+   "Class": "040380",
+   "LocationPath": null
+  }
+ ],
+ "Hda": [],
+ "Input": [
+  {
+   "Ids": "ACPI\\MSFT0001 PNP0C50",
+   "I2C": true
+  },
+  {
+   "Ids": "ACPI\\PNP0303",
+   "I2C": false
+  }
+ ],
+ "Nics": [
+  {
+   "Name": "eth",
+   "Mac": "00:1A:2B:3C:4D:5E",
+   "PnpId": "PCI\\VEN_8086"
+  }
+ ],
+ "Disks": [
+  {
+   "Number": 0,
+   "Model": "SAMSUNG MZVLB512HBJQ PM981",
+   "BusType": "NVMe",
+   "SizeGB": 512
+  }
+ ]
+}

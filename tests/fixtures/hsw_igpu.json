@@ -1,0 +1,61 @@
+{
+ "Cpu": {
+  "Name": "Intel(R) Core(TM) i5-4570 CPU @ 3.20GHz",
+  "Manufacturer": "GenuineIntel",
+  "Cores": 4,
+  "Threads": 8,
+  "Family": 6,
+  "Model": 60,
+  "Stepping": 3
+ },
+ "System": {
+  "Manufacturer": "Dell Inc.",
+  "Model": "OptiPlex 9020",
+  "PCSystemType": 1,
+  "ChassisTypes": [
+   3
+  ],
+  "HasBattery": false,
+  "BoardManufacturer": "Dell",
+  "BoardProduct": "0JP3NX",
+  "Firmware": "UEFI",
+  "RamGB": 16
+ },
+ "Pci": [
+  {
+   "Ven": 32902,
+   "Dev": 1042,
+   "Class": "030000",
+   "LocationPath": null
+  },
+  {
+   "Ven": 32902,
+   "Dev": 5434,
+   "Class": "020000",
+   "LocationPath": null
+  },
+  {
+   "Ven": 32902,
+   "Dev": 35872,
+   "Class": "040300",
+   "LocationPath": null
+  }
+ ],
+ "Hda": [],
+ "Input": [],
+ "Nics": [
+  {
+   "Name": "eth",
+   "Mac": "00:1A:2B:3C:4D:5E",
+   "PnpId": "PCI\\VEN_8086"
+  }
+ ],
+ "Disks": [
+  {
+   "Number": 0,
+   "Model": "Samsung SSD 970 EVO",
+   "BusType": "NVMe",
+   "SizeGB": 500
+  }
+ ]
+}

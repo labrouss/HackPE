@@ -1,0 +1,67 @@
+{
+ "Cpu": {
+  "Name": "12th Gen Intel(R) Core(TM) i5-12600K",
+  "Manufacturer": "GenuineIntel",
+  "Cores": 10,
+  "Threads": 20,
+  "Family": 6,
+  "Model": 151,
+  "Stepping": 2
+ },
+ "System": {
+  "Manufacturer": "To Be Filled",
+  "Model": "System",
+  "PCSystemType": 1,
+  "ChassisTypes": [
+   3
+  ],
+  "HasBattery": false,
+  "BoardManufacturer": "Gigabyte",
+  "BoardProduct": "Z690 AORUS ELITE",
+  "Firmware": "UEFI",
+  "RamGB": 16
+ },
+ "Pci": [
+  {
+   "Ven": 32902,
+   "Dev": 18048,
+   "Class": "030000",
+   "LocationPath": null
+  },
+  {
+   "Ven": 4318,
+   "Dev": 9476,
+   "Class": "030000",
+   "LocationPath": null
+  },
+  {
+   "Ven": 32902,
+   "Dev": 5619,
+   "Class": "020000",
+   "LocationPath": null
+  },
+  {
+   "Ven": 32902,
+   "Dev": 31440,
+   "Class": "040300",
+   "LocationPath": null
+  }
+ ],
+ "Hda": [],
+ "Input": [],
+ "Nics": [
+  {
+   "Name": "eth",
+   "Mac": "00:1A:2B:3C:4D:5E",
+   "PnpId": "PCI\\VEN_8086"
+  }
+ ],
+ "Disks": [
+  {
+   "Number": 0,
+   "Model": "Samsung SSD 970 EVO",
+   "BusType": "NVMe",
+   "SizeGB": 500
+  }
+ ]
+}

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.iso
+HackPE-Build/
+cache/
+data/cacert.pem
+python/

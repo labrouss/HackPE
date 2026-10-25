@@ -1,0 +1,67 @@
+{
+ "Cpu": {
+  "Name": "AMD Ryzen 5 5600X 6-Core Processor",
+  "Manufacturer": "AuthenticAMD",
+  "Cores": 6,
+  "Threads": 12,
+  "Family": 25,
+  "Model": 33,
+  "Stepping": 0
+ },
+ "System": {
+  "Manufacturer": "To Be Filled",
+  "Model": "System",
+  "PCSystemType": 1,
+  "ChassisTypes": [
+   3
+  ],
+  "HasBattery": false,
+  "BoardManufacturer": "Micro-Star",
+  "BoardProduct": "MAG B550 TOMAHAWK",
+  "Firmware": "UEFI",
+  "RamGB": 16
+ },
+ "Pci": [
+  {
+   "Ven": 4098,
+   "Dev": 29679,
+   "Class": "030000",
+   "LocationPath": "PCIROOT(0)#PCI(0301)#PCI(0000)#PCI(0000)#PCI(0000)"
+  },
+  {
+   "Ven": 4332,
+   "Dev": 33061,
+   "Class": "020000",
+   "LocationPath": null
+  },
+  {
+   "Ven": 4130,
+   "Dev": 5255,
+   "Class": "040300",
+   "LocationPath": null
+  },
+  {
+   "Ven": 32902,
+   "Dev": 10019,
+   "Class": "028000",
+   "LocationPath": null
+  }
+ ],
+ "Hda": [],
+ "Input": [],
+ "Nics": [
+  {
+   "Name": "eth",
+   "Mac": "00:1A:2B:3C:4D:5E",
+   "PnpId": "PCI\\VEN_8086"
+  }
+ ],
+ "Disks": [
+  {
+   "Number": 0,
+   "Model": "Samsung SSD 970 EVO",
+   "BusType": "NVMe",
+   "SizeGB": 500
+  }
+ ]
+}

@@ -1,0 +1,11 @@
+# Windows scripts must have CRLF line endings (cmd.exe labels/goto break with LF)
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+*.py   text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.md   text eol=lf
+*.inf  -text
+*.sys  binary
+*.cat  binary

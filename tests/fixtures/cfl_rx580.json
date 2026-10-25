@@ -1,0 +1,90 @@
+{
+ "Cpu": {
+  "Name": "Intel(R) Core(TM) i7-8700K CPU @ 3.70GHz",
+  "Manufacturer": "GenuineIntel",
+  "Cores": 6,
+  "Threads": 12,
+  "Family": 6,
+  "Model": 158,
+  "Stepping": 10
+ },
+ "System": {
+  "Manufacturer": "To Be Filled",
+  "Model": "System",
+  "PCSystemType": 1,
+  "ChassisTypes": [
+   3
+  ],
+  "HasBattery": false,
+  "BoardManufacturer": "ASUSTeK",
+  "BoardProduct": "PRIME Z390-A",
+  "Firmware": "UEFI",
+  "RamGB": 16
+ },
+ "Pci": [
+  {
+   "Ven": 32902,
+   "Dev": 16018,
+   "Class": "030000",
+   "LocationPath": "PCIROOT(0)#PCI(0200)"
+  },
+  {
+   "Ven": 4098,
+   "Dev": 26591,
+   "Class": "030000",
+   "LocationPath": "PCIROOT(0)#PCI(0100)#PCI(0000)"
+  },
+  {
+   "Ven": 4098,
+   "Dev": 43760,
+   "Class": "040300",
+   "LocationPath": null
+  },
+  {
+   "Ven": 32902,
+   "Dev": 5564,
+   "Class": "020000",
+   "LocationPath": null
+  },
+  {
+   "Ven": 32902,
+   "Dev": 41800,
+   "Class": "040300",
+   "LocationPath": null
+  },
+  {
+   "Ven": 32902,
+   "Dev": 41733,
+   "Class": "060100",
+   "LocationPath": null
+  },
+  {
+   "Ven": 5197,
+   "Dev": 43016,
+   "Class": "010802",
+   "LocationPath": null
+  }
+ ],
+ "Hda": [
+  {
+   "Ven": 4332,
+   "Dev": 4640
+  }
+ ],
+ "Input": [],
+ "Nics": [
+  {
+   "Name": "eth",
+   "Mac": "00:1A:2B:3C:4D:5E",
+   "PnpId": "PCI\\VEN_8086"
+  }
+ ],
+ "Disks": [
+  {
+   "Number": 0,
+   "Model": "Samsung SSD 970 EVO",
+   "BusType": "NVMe",
+   "SizeGB": 500
+  }
+ ]
+}

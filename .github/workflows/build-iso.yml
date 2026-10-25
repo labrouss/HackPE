@@ -1,0 +1,157 @@
+name: Build HackPE ISO
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore: ['**.md', 'docs/**']
+  pull_request:
+  schedule:
+    - cron: '17 3 1 * *'          # monthly rebuild -> picks up new OpenCore / kext releases
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Publish the ISO as a GitHub release'
+        type: boolean
+        default: false
+      python_version:
+        description: 'Embeddable Python version bundled in WinPE'
+        default: '3.12.10'
+
+permissions:
+  contents: write                  # needed to create releases
+
+concurrency:
+  group: hackpe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --------------------------------------------------------------------------
+  test:
+    name: Lint + EFI regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python lint
+        run: |
+          pip install pyflakes
+          python -m pyflakes engine tests
+
+      - name: PowerShell syntax check
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $e = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$e)
+            foreach ($x in $e) { Write-Host "::error file=$($_.FullName),line=$($x.Extent.StartLineNumber)::$($x.Message)"; $bad++ }
+          }
+          exit $bad
+
+      - name: Build EFIs for test hardware + ocvalidate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tests/run_tests.py
+
+  # --------------------------------------------------------------------------
+  iso:
+    name: Build WinPE ISO
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          if ('${{ github.ref_type }}' -eq 'tag') { $v = '${{ github.ref_name }}' }
+          else { $v = "$(Get-Date -Format 'yyyy.MM.dd')-$('${{ github.sha }}'.Substring(0, 7))" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "HackPE version $v"
+
+      - name: Install Windows ADK + WinPE add-on
+        shell: powershell
+        run: |
+          $ocs = "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment\amd64\WinPE_OCs"
+          if (Test-Path $ocs) { Write-Host 'ADK + WinPE already installed'; exit 0 }
+          # ADK 10.1.26100.x (Windows 11 24H2/25H2) - links from learn.microsoft.com/windows-hardware/get-started/adk-install
+          curl.exe -sSL -o "$env:RUNNER_TEMP\adksetup.exe"      'https://go.microsoft.com/fwlink/?linkid=2289980'
+          curl.exe -sSL -o "$env:RUNNER_TEMP\adkwinpesetup.exe" 'https://go.microsoft.com/fwlink/?linkid=2289981'
+          $p = Start-Process "$env:RUNNER_TEMP\adksetup.exe" -Wait -PassThru `
+                 -ArgumentList '/quiet /norestart /ceip off /features OptionId.DeploymentTools'
+          if ($p.ExitCode -ne 0) { throw "adksetup failed: $($p.ExitCode)" }
+          $p = Start-Process "$env:RUNNER_TEMP\adkwinpesetup.exe" -Wait -PassThru `
+                 -ArgumentList '/quiet /norestart /ceip off /features OptionId.WindowsPreinstallationEnvironment'
+          if ($p.ExitCode -ne 0) { throw "adkwinpesetup failed: $($p.ExitCode)" }
+          if (-not (Test-Path $ocs)) { throw 'WinPE optional components not found after install' }
+          Write-Host 'ADK installed'
+
+      - name: Build HackPE
+        shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}     # 1000 GitHub API calls/h instead of 60
+          PYVER: ${{ inputs.python_version || '3.12.10' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = "$env:RUNNER_TEMP\out"; New-Item -ItemType Directory -Force $out | Out-Null
+          $iso = Join-Path $out 'HackPE-${{ steps.ver.outputs.version }}.iso'
+          $params = @{
+            WorkDir       = "$env:RUNNER_TEMP\build"
+            IsoPath       = $iso
+            Version       = '${{ steps.ver.outputs.version }}'
+            PythonVersion = $env:PYVER
+          }
+          if (Get-ChildItem drivers -Recurse -Filter *.inf -ErrorAction SilentlyContinue) {
+            $params.DriversPath = (Resolve-Path drivers).Path
+            Write-Host 'Injecting drivers from ./drivers'
+          }
+          .\Build-HackPE.ps1 @params
+          $hash = (Get-FileHash $iso -Algorithm SHA256).Hash.ToLower()
+          "$hash  $(Split-Path $iso -Leaf)" | Set-Content -Encoding ascii "$iso.sha256"
+
+      - name: Job summary
+        if: always()
+        shell: powershell
+        run: |
+          $py = "$env:RUNNER_TEMP\build\stage\HackPE\python\python.exe"
+          $st = if (Test-Path $py) { & $py "$env:RUNNER_TEMP\build\stage\HackPE\engine\hackpe.py" --cache "$env:RUNNER_TEMP\build\cache" status | Out-String } else { 'build did not get far enough' }
+          $iso = Get-ChildItem "$env:RUNNER_TEMP\out\*.iso" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $size = if ($iso) { '{0:N0} MB' -f ($iso.Length / 1MB) } else { 'n/a' }
+          @"
+          ## HackPE ${{ steps.ver.outputs.version }}
+          ISO size: **$size**
+
+          ``````
+          $st
+          ``````
+          "@ | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HackPE-${{ steps.ver.outputs.version }}
+          path: ${{ runner.temp }}\out\*
+          retention-days: 7
+          compression-level: 0
+
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag' || inputs.publish_release || github.event_name == 'schedule'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'
+          $files = (Get-ChildItem "$env:RUNNER_TEMP\out\*").FullName
+          $pre = if ('${{ github.ref_type }}' -eq 'tag') { @() } else { @('--prerelease') }
+          gh release view $v *> $null
+          if ($LASTEXITCODE -eq 0) { gh release upload $v @files --clobber }
+          else { gh release create $v @files --title "HackPE $v" --target '${{ github.sha }}' --generate-notes @pre }
+          if ($LASTEXITCODE -ne 0) { throw 'release failed' }
