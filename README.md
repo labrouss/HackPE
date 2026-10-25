@@ -51,7 +51,7 @@ Push this folder to a GitHub repository and `.github/workflows/build-iso.yml` do
 | push to `main` | test + ISO as a workflow **artifact** (kept 7 days) |
 | push a tag `v1.0.0` | test + ISO + **GitHub Release** `v1.0.0` |
 | *Actions → Build HackPE ISO → Run workflow* | manual build, optional release / Python version |
-| 1st of every month | rebuild with the newest OpenCore and kexts, published as a pre-release |
+| every Monday | rebuild with the newest everything; publishes a pre-release **only if a component changed** |
 | pull request | tests only |
 
 ```bash
@@ -60,6 +60,15 @@ git remote add origin https://github.com/<you>/hackpe.git
 git push -u origin main
 git tag v1.0.0 && git push origin v1.0.0        # -> release with the ISO
 ```
+
+**Always the latest:** every build resolves the newest OpenCore, kexts, apps and tools (no cache between runs). It also builds the newest stable embeddable Python, the latest ACPICA release (built from source) and the current Windows ADK.
+
+**Changelog:** each release gets generated notes:
+- a table of component upgrades (⬆️) and additions (🆕) compared with the previous release's `versions.json`
+- the HackPE commits since that release
+- the full list of bundled versions and the ISO's SHA-256
+
+Re-running a release updates its notes.
 
 Extra NIC/storage drivers: commit them into `drivers/` and they're injected into WinPE automatically.
 A Windows build takes about 25–40 minutes, mostly ADK download and DISM.
@@ -81,7 +90,90 @@ Boot the target PC from the HackPE stick (UEFI mode, Secure Boot off). The **Ass
 
 **After installing macOS**, boot HackPE again and choose *macOS is already installed*. Pick the macOS drive, and the Assistant copies OpenCore from the installer stick (or builds a fresh one) to that drive's EFI partition, leaving Windows' boot loader alone.
 
-Every page has a *Need help with this step?* link. **Expert mode** (the tabbed GUI with every option) and a text-mode menu/wizard are always available.
+Every page has a *Need help with this step?* link.
+
+## HackPE Bar (taskbar-style menu)
+
+When HackPE boots, a **taskbar docked at the bottom of the screen** replaces the old numbered text menu, and the Assistant opens above it:
+
+```
+[ HackPE ] | ACPI  USB  EFI  macOS  Apps  Your tools  System  Windows      ...status   Net: LAN 192.168.1.20   14:05   Power
+```
+
+| Menu | What's in it |
+|---|---|
+| **HackPE** | Assistant, Expert mode, text-mode wizard, hardware report, bundled versions, pre-flight check, update downloads, classic text menu |
+| **ACPI** | Dump ACPI tables, auto-generate SSDTs for this PC, SSDTTime (all options), view generated SSDTs/patches |
+| **USB** | USBToolBox port mapping, make a USB installer, add HackPE to a stick's OpenCore menu |
+| **EFI** | Rebuild EFI with SSDTs + USB map, OpCore-Simplify, Hardware-Sniffer, Ferramentas TOPS, OCAuxiliaryTools, ocvalidate, macserial, open an EFI partition |
+| **macOS** | Full offline installer (gibMacOS), gibMacOS interactive, USB installer, post-install EFI to the internal disk |
+| **Apps** | Explorer++, Notepad++, OCAuxiliaryTools, Command prompt, PowerShell, Git Bash, DiskPart, *Run a program…* (file picker) |
+| **Your tools** | Everything in `\HackPE\tools` on the stick (refreshed every time the menu opens) |
+| **System** | Network status, Wi-Fi, load drivers from a folder (folder picker) or from `\HackPE\drivers` |
+| **Windows** | Switch between open windows (WinPE has no taskbar of its own) |
+| **Power** | Restart, Shut down |
+
+- Every tool opens **maximized in its own window**. In WinPE the bar reserves its strip of the screen, so maximized windows stop above it instead of covering it.
+- The network label shows the current IP; click it for the network status.
+- **Keyboard:** click the bar (or Alt+Tab to *HackPE Bar*), then **F1…F9** open the menus in order (F1 HackPE … F9 Windows). Arrow keys move through a menu, Enter runs the item, and Esc closes it.
+- **Fallback:** *HackPE › Classic text menu* (or Alt+F4 on the bar) returns to the numbered text menu, where **`B`** brings the bar back. If PowerShell/WinForms can't start, the text menu appears on its own.
+
+## Text menu and Tools (`T`)
+
+The classic text menu has option **`T  Tools`**. A single tool can also run by its key (`hackpe.py tools --run 2` = auto-generate SSDTs), which is what the bar does. Every tool also has a CLI (`hackpe.py <command>`):
+
+| Key | Tool | CLI |
+|---|---|---|
+| 1 | **Dump ACPI tables** with 64-bit `acpidump.exe`, falling back to the Windows firmware-table API. A copy is kept in `\HackPE\acpi` on the stick. | `acpi-dump` |
+| 2 | **Auto-generate SSDTs**: dumps the tables, then drives SSDTTime with the right generators for the detected platform (EC, USBX, PLUG, RTCAWAC, PMC on 300-series, PNLF and XOSI on laptops). | `ssdt-auto` |
+| 3 | SSDTTime, interactive with all options | `ssdttime` |
+| 5 | **USBToolBox**, which produces `UTBMap.kext` (copied to `\HackPE\usbmap` on the stick) | `usbtoolbox` |
+| 6 | Rebuild the EFI. Generated SSDTs and the USB map are picked up automatically. Generated SSDTs replace the matching prebuilt ones; prebuilt ones fill any gaps (e.g. SSDT-CPUR on AMD). | `build-efi` |
+| 7 / 8 / 9 | ocvalidate · macserial · mount the EFI partition of any disk | `validate` |
+| X / E / O | **Explorer++** (file explorer) · **Notepad++** · **OCAuxiliaryTools** (config editor) | `app explorer\|notepad\|ocat` |
+| W / L | **Wi-Fi connect** · **load drivers from a folder** | `wifi`, `load-drivers` |
+| R / T1… | **Run any program** (`.exe .py .cmd .bat .ps1`) · your own tools from `\HackPE\tools` on the stick or `tools/custom` in the repo | `run` |
+
+`acpidump.exe` and `iasl.exe` are **64-bit builds** made from the official ACPICA source by `build/build-acpica-win64.sh` (MinGW-w64, done in CI). Intel only ships 32-bit Windows binaries, and x64 WinPE has no WOW64 layer to run them. When HackPE is built, any Windows DLLs the bundled apps need that WinPE lacks (DirectX, dwmapi, uxtheme…) are found by scanning the PE imports and copied from the build host.
+
+## Full offline installer (no internet during the install)
+
+Tick *Also put the FULL offline installer on the stick* in the Assistant, or run `make-usb --offline`. This needs a 32 GB+ stick and Big Sur or newer. The stick gets two partitions:
+
+| Partition | Content |
+|---|---|
+| `OPENCORE` (FAT32, 4 GB) | EFI + macOS Recovery (to boot the installer environment) |
+| `MACOS-INST` (exFAT) | Apple's full `InstallAssistant.pkg` (12–18 GB, via **gibMacOS**) + `install-offline.sh` |
+
+In Recovery, erase the disk as *Macintosh HD*, then open **Utilities > Terminal** and run `sh /Volumes/MACOS-INST/install-offline.sh`. The script unpacks the installer onto the disk and starts `startosinstall`, so no network is needed. Windows can't build Apple's native full-installer USB (that needs macOS tools); this route gets the same result.
+
+## Boot HackPE from the OpenCore menu
+
+When the installer stick is created from HackPE, *Add HackPE to this stick's OpenCore boot menu* (on by default) copies the toolkit (about 2 GB) onto the stick's OPENCORE partition and adds a **"HackPE Toolkit"** entry to the OpenCore picker. One stick then installs macOS **and** boots the toolkit, for example to install the EFI to the internal disk, regenerate SSDTs or map USB.
+
+How it works: Windows Boot Manager is registered as an OpenCore **Tools** entry (`EFI\OC\Tools\HackPE.efi`, `RealPath=true`). It reads `\EFI\Microsoft\Boot\BCD` from the same partition, and the BCD boots `\sources\boot.wim` from that partition as a RAM disk. OpenCore's own `EFI\BOOT\BOOTx64.efi` is untouched.
+
+- Existing OpenCore stick: Tools `A` or `hackpe.py add-hackpe --target O:\`.
+- Internal disk: when OpenCore is installed to the EFI partition, HackPE is added only if the whole toolkit fits there and no Windows boot loader lives on it. Otherwise the entry is left out (EFI partitions are usually 100–300 MB).
+
+## Drivers: touchpad, Ethernet, Wi-Fi
+
+| Source | What | How |
+|---|---|---|
+| **Inbox drivers of the build host** (default) | HID-over-I2C/SPI, Intel/AMD Serial-IO I2C and GPIO controllers (needed by most laptop touchpads), Realtek/Intel/Killer Ethernet, USB Ethernet, Android/iPhone USB tethering (RNDIS/NCM), Wi-Fi adapters | `-HarvestInboxDrivers $true` |
+| **This PC's own drivers** | Build on the target laptop to include its exact touchpad, LAN and Wi-Fi drivers | `-HarvestHostDrivers` |
+| `drivers/` in the repo | Your `.inf` driver folders | committed → CI |
+| `drivers/sources.txt` | URLs of `.zip`/`.cab` driver packs (one per line) | downloaded at build |
+| **`\HackPE\drivers` on the stick** | Drop drivers there; they're **loaded at every boot** with no rebuild needed | automatic |
+
+Wi-Fi: plain WinPE has **no WLAN service**, so Wi-Fi drivers alone are not enough. Build on Windows 11 with
+`-WindowsIso D:\Win11.iso` (or `-WinReWim C:\path\winre.wim`). HackPE then uses **WinRE** as its base, which includes the Wi-Fi stack, and `W  Wi-Fi connect` works. Without it, use Ethernet, a USB Ethernet adapter, or phone USB tethering.
+
+All tools start **maximized**: the console is enlarged and maximized, GUI apps get `SW_MAXIMIZE`, and their windows are maximized by process ID as a fallback (for apps that ignore the start-up flag). The Assistant and Expert mode open full-screen.
+
+Other tools: drop any portable 64-bit tool (e.g. a downloaded hackintosh utility pack) into `\\HackPE\\tools` on the stick or `tools/custom` in the repo. It shows up as T1, T2… in the Tools menu.
+
+No mouse or touchpad yet? Everything is keyboard-driven: Tab/Enter in the GUI, F1…F9 + arrows on the HackPE Bar, and the text menus. **Expert mode** (the tabbed GUI with every option) and a text-mode menu/wizard are always available.
 
 Command line (same engine, also works on normal Windows):
 
@@ -130,12 +222,16 @@ Supported dGPUs: Polaris (RX 460–590), Vega 56/64, Radeon VII, RX 5500/5600/57
 
 ```
 Build-HackPE.ps1      host builder (ADK/WinPE, payload, cache, ISO/USB)
-Launch.cmd                 WinPE auto-start + text menu fallback
+Launch.cmd                 WinPE auto-start: HackPE Bar, text menu fallback
+gui/HackPE-Bar.ps1         taskbar-style launcher docked at the bottom of the screen
 gui/HackPE-Assistant.ps1   guided step-by-step assistant (default)
 gui/HackPE-Expert.ps1      expert GUI (5 tabs, every option)
 engine/hackpe.py      engine: detect/plan/fetch/build-efi/recovery/make-usb/install-esp/wizard
 engine/hwdb.py        hardware knowledge base (CPU/GPU/NIC/Wi-Fi, SMBIOS rules, quirks, packages)
 engine/detect.ps1     driver-independent hardware probe
+engine/tools.py       Tools menu: ACPI dump, SSDT auto-gen, SSDTTime, USBToolBox, apps, drivers, Wi-Fi
+build/                build-acpica-win64.sh (64-bit iasl/acpidump for WinPE)
+tools/custom/         your own tools, baked into the ISO
 tests/                regression tests + hardware fixtures (run in CI)
 drivers/              optional extra WinPE drivers (injected by CI)
 .github/workflows/    GitHub Actions: test + ISO build + release

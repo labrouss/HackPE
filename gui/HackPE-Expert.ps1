@@ -7,6 +7,11 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+# Hide the PowerShell console behind the GUI (start-up 'minimized' flags would also minimize the form)
+try {
+    Add-Type -Name ConWin -Namespace HackPE -MemberDefinition '[DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int n);' -ErrorAction Stop
+    $null = [HackPE.ConWin]::ShowWindow([HackPE.ConWin]::GetConsoleWindow(), 0)
+} catch {}
 $ErrorActionPreference = 'Continue'
 
 # ---------------------------------------------------------------- paths ----
@@ -57,7 +62,7 @@ function Start-EngineConsole([string[]]$EngineArgs, [string]$Title) {
             "$line`r`necho.`r`nif errorlevel 1 (echo *** FAILED with exit code %errorlevel% ***) else (echo *** Finished successfully ***)`r`n" +
             "echo Press any key to close this window.`r`npause >nul`r`n"
     [IO.File]::WriteAllText($f, $body, [Text.Encoding]::ASCII)
-    Start-Process -FilePath 'cmd.exe' -ArgumentList "/c `"$f`""
+    Start-Process -FilePath 'cmd.exe' -ArgumentList "/c `"$f`"" -WindowStyle Maximized
     Write-Log "Started: $Title"
 }
 
@@ -125,7 +130,7 @@ function New-DiskList($x, $y, $w, $h) {
 # ------------------------------------------------------------------ form ----
 $Form = New-Object Windows.Forms.Form
 $Form.Text = 'HackPE - Expert mode (OpenCore, macOS up to 26 Tahoe)'
-$Form.Size = '1080,780'; $Form.StartPosition = 'CenterScreen'; $Form.MinimumSize = '1000,700'
+$Form.Size = '1080,780'; $Form.StartPosition = 'CenterScreen'; $Form.MinimumSize = '1000,700'; $Form.WindowState = 'Maximized'
 $Form.Font = New-Object Drawing.Font('Segoe UI', 9)
 
 $Header = New-Object Windows.Forms.Label
@@ -205,11 +210,11 @@ $b.Add_Click({
     Start-EngineConsole $a 'Build EFI'
 })
 $b2 = New-Btn 'Edit config.plist' 190 10
-$b2.Add_Click({ $c = Join-Path (Get-EfiOut) 'EFI\OC\config.plist'; if (Test-Path $c) { Start-Process notepad.exe $c } else { Write-Log 'Build the EFI first' } })
+$b2.Add_Click({ $c = Join-Path (Get-EfiOut) 'EFI\OC\config.plist'; if (Test-Path $c) { $null = Invoke-Engine @('app', 'notepad', $c) } else { Write-Log 'Build the EFI first' } })
 $b3 = New-Btn 'Validate (ocvalidate)' 368 10
 $b3.Add_Click({ $c = Join-Path (Get-EfiOut) 'EFI\OC\config.plist'; if (Test-Path $c) { Write-Log (Invoke-Engine @('validate', $c)) } else { Write-Log 'Build the EFI first' } })
 $b4 = New-Btn 'Build notes' 546 10
-$b4.Add_Click({ $c = Join-Path (Get-EfiOut) 'BUILD-NOTES.txt'; if (Test-Path $c) { Start-Process notepad.exe $c } else { Write-Log 'Build the EFI first' } })
+$b4.Add_Click({ $c = Join-Path (Get-EfiOut) 'BUILD-NOTES.txt'; if (Test-Path $c) { $null = Invoke-Engine @('app', 'notepad', $c) } else { Write-Log 'Build the EFI first' } })
 $b5 = New-Btn 'Copy EFI to folder...' 724 10
 $b5.Add_Click({
     $src = Join-Path (Get-EfiOut) 'EFI'
@@ -224,6 +229,8 @@ $t4 = New-Object Windows.Forms.TabPage; $t4.Text = '4. USB installer'
 $UsbList = New-DiskList 12 52 640 300
 $AnyBus = New-Object Windows.Forms.CheckBox; $AnyBus.Text = 'Show non-USB disks (dangerous)'; $AnyBus.Location = '670,56'; $AnyBus.AutoSize = $true
 $NoRec = New-Object Windows.Forms.CheckBox; $NoRec.Text = 'Skip recovery download (EFI only)'; $NoRec.Location = '670,82'; $NoRec.AutoSize = $true
+$Offline4 = New-Object Windows.Forms.CheckBox; $Offline4.Text = 'Full offline installer (gibMacOS, 32 GB+)'; $Offline4.Location = '670,350'; $Offline4.AutoSize = $true
+$WithPE4 = New-Object Windows.Forms.CheckBox; $WithPE4.Text = 'Add HackPE to the stick''s OpenCore menu'; $WithPE4.Location = '670,376'; $WithPE4.AutoSize = $true; $WithPE4.Checked = $IsPE; $WithPE4.Enabled = $IsPE
 $Force4 = New-Object Windows.Forms.CheckBox; $Force4.Text = 'Force (ignore blockers)'; $Force4.Location = '670,108'; $Force4.AutoSize = $true
 $info4 = New-Object Windows.Forms.Label; $info4.Location = '670,140'; $info4.Size = '340,210'
 $info4.Text = "Creates the installer on the selected stick (>= 4 GB, it will be ERASED):`r`n`r`n" +
@@ -244,6 +251,8 @@ $b2.Add_Click({
     $a = @('make-usb') + (Get-PlanArgs) + @('--disk', $n, '--yes', '--out', (Get-EfiOut))
     if ($AnyBus.Checked) { $a += '--any-bus' }
     if ($NoRec.Checked) { $a += '--no-recovery' }
+    if ($Offline4.Checked) { $a += '--offline' }
+    if ($WithPE4.Checked) { $a += '--with-hackpe' }
     if ($Force4.Checked) { $a += '--force' }
     Start-EngineConsole $a 'Create USB installer'
 })
@@ -252,7 +261,7 @@ $b3.Add_Click({
     $d = New-Object Windows.Forms.FolderBrowserDialog
     if ($d.ShowDialog() -eq 'OK') { Start-EngineConsole @('recovery', '--target', (Get-Target), '--out', (Join-Path $d.SelectedPath 'com.apple.recovery.boot')) 'Download recovery' }
 })
-$t4.Controls.AddRange(@($b, $b2, $b3, $UsbList, $AnyBus, $NoRec, $Force4, $info4))
+$t4.Controls.AddRange(@($b, $b2, $b3, $UsbList, $AnyBus, $NoRec, $Force4, $Offline4, $WithPE4, $info4))
 
 # ---- Tab 5: post-install & tools ------------------------------------------------
 $t5 = New-Object Windows.Forms.TabPage; $t5.Text = '5. Post-install & tools'
@@ -274,47 +283,45 @@ $b2.Add_Click({
 $t5.Controls.AddRange(@($b, $b2, $EspList))
 
 $tools = @(
-    @('Command prompt', { Start-Process cmd.exe -ArgumentList "/k cd /d `"$Work`"" }),
-    @('Notepad', { Start-Process notepad.exe }),
-    @('Network status', { Start-Process cmd.exe -ArgumentList '/k ipconfig /all & ping -n 2 www.apple.com' }),
-    @('Load driver (.inf)...', {
-        $d = New-Object Windows.Forms.OpenFileDialog; $d.Filter = 'Driver|*.inf'
-        if ($d.ShowDialog() -eq 'OK') { Write-Log ((& drvload.exe $d.FileName 2>&1) | Out-String); if ($IsPE) { & wpeutil InitializeNetwork | Out-Null } }
+    @('File explorer (Explorer++)', { $null = Invoke-Engine @('app', 'explorer') }),
+    @('Text editor (Notepad++)', { $null = Invoke-Engine @('app', 'notepad') }),
+    @('OCAuxiliaryTools (OCAT)', { $null = Invoke-Engine @('app', 'ocat'); Write-Log 'OCAT started (if nothing appears, run OCAT on full Windows)' }),
+    @('Tools menu (text mode)', { Start-EngineConsole @('tools') 'Tools' }),
+    @('Dump ACPI tables', { Start-EngineConsole @('acpi-dump') 'ACPI dump' }),
+    @('Auto-generate SSDTs', {
+        $a = @('ssdt-auto'); if (Test-Path $HwJson) { $a += @('--hw', $HwJson) }
+        Start-EngineConsole $a 'SSDT auto-generation'; Write-Log 'Generated SSDTs are used automatically by the next Build EFI'
     }),
+    @('SSDTTime (interactive)', { Start-EngineConsole @('ssdttime') 'SSDTTime' }),
+    @('USBToolBox (USB map)', { Start-EngineConsole @('usbtoolbox') 'USBToolBox' }),
+    @('Full offline installer...', {
+        $d = New-Object Windows.Forms.FolderBrowserDialog; $d.Description = 'Destination on an exFAT/NTFS drive (files > 4 GB)'
+        if ($d.ShowDialog() -eq 'OK') { Start-EngineConsole @('offline-installer', '--target', (Get-Target), '--out', $d.SelectedPath) 'Full offline installer' }
+    }),
+    @('gibMacOS (interactive)', { Start-EngineConsole @('gibmacos') 'gibMacOS' }),
+    @('OpCore-Simplify', { Start-EngineConsole @('opcore-simplify') 'OpCore-Simplify' }),
+    @('Hardware-Sniffer report', { Start-EngineConsole @('hardware-sniffer') 'Hardware-Sniffer' }),
+    @('Load drivers (folder)...', {
+        $d = New-Object Windows.Forms.FolderBrowserDialog; $d.Description = 'Folder with .inf drivers (searched recursively)'
+        if ($d.ShowDialog() -eq 'OK') { Start-EngineConsole @('load-drivers', '--folder', $d.SelectedPath) 'Load drivers' }
+    }),
+    @('Wi-Fi connect', { Start-EngineConsole @('wifi') 'Wi-Fi' }),
+    @('Ferramentas TOPS', { Start-EngineConsole @('tops') 'Ferramentas TOPS' }),
+    @('Add HackPE to OC stick...', {
+        $d = New-Object Windows.Forms.FolderBrowserDialog; $d.Description = 'Root of the OpenCore stick/partition (contains EFI\OC)'
+        if ($d.ShowDialog() -eq 'OK') { Start-EngineConsole @('add-hackpe', '--target', $d.SelectedPath) 'Add HackPE to OpenCore' }
+    }),
+    @('Git Bash', { Start-EngineConsole @('bash') 'Git Bash' }),
+    @('Network status', { Start-Process cmd.exe -ArgumentList '/k ipconfig /all & ping -n 2 www.apple.com' -WindowStyle Maximized }),
     @('Update downloads (online)', { Start-EngineConsole @('fetch') 'Update OpenCore & kexts' }),
     @('Download cache status', { Write-Log (Invoke-Engine @('status')) }),
-    @('SSDTTime (custom SSDTs)', {
-        $dst = Join-Path $Root 'tools\SSDTTime'
-        if (-not (Test-Path (Join-Path $dst 'SSDTTime.py'))) {
-            $zip = $null
-            foreach ($c in ($env:HACKPE_CACHE -split ';')) { $z = Get-ChildItem (Join-Path $c 'pkg') -Filter 'SSDTTime*.zip' -ErrorAction SilentlyContinue | Select-Object -First 1; if ($z) { $zip = $z.FullName; break } }
-            if (-not $zip) { Write-Log 'SSDTTime not cached - run Update downloads'; return }
-            $tmp = Join-Path $Work 'ssdttime-x'; Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-            Add-Type -AssemblyName System.IO.Compression.FileSystem
-            [IO.Compression.ZipFile]::ExtractToDirectory($zip, $tmp)
-            New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
-            Move-Item (Get-ChildItem $tmp -Directory | Select-Object -First 1).FullName $dst
-        }
-        $f = Join-Path $Work 'ssdttime.cmd'
-        [IO.File]::WriteAllText($f, "@echo off`r`ncd /d `"$dst`"`r`n`"$Py`" SSDTTime.py`r`npause`r`n", [Text.Encoding]::ASCII)
-        Start-Process cmd.exe -ArgumentList "/c `"$f`""
-        Write-Log 'SSDTTime: dump DSDT, generate FakeEC/PLUG/AWAC/PMC/USBX..., then rebuild the EFI'
-    }),
-    @('USBToolBox (USB map)', {
-        $exe = $null
-        foreach ($c in ($env:HACKPE_CACHE -split ';')) { $z = Join-Path $c 'pkg\Windows.exe'; if (Test-Path $z) { $exe = $z; break } }
-        if (-not $exe) { Write-Log 'USBToolBox not cached - run Update downloads'; return }
-        $map = Join-Path $Root 'usbmap'; New-Item -ItemType Directory -Force $map | Out-Null
-        Start-Process -FilePath $exe -WorkingDirectory $map
-        Write-Log "USBToolBox: discover ports, select <=15, Build UTBMap.kext; copy it to $map then rebuild"
-    }),
+    @('Command prompt', { Start-Process cmd.exe -ArgumentList "/k cd /d `"$Work`"" -WindowStyle Maximized }),
     @('Text-mode wizard', { Start-EngineConsole @('wizard') 'Wizard' }),
-    @('Reboot', { if ($IsPE) { & wpeutil reboot } else { Write-Log 'Not in WinPE - reboot manually' } }),
-    @('Shut down', { if ($IsPE) { & wpeutil shutdown } else { Write-Log 'Not in WinPE' } })
+    @('Reboot', { if ($IsPE) { & wpeutil reboot } else { Write-Log 'Not in WinPE - reboot manually' } })
 )
 $i = 0
 foreach ($t in $tools) {
-    $x = 670 + ($i % 2) * 180; $y = 52 + [math]::Floor($i / 2) * 40
+    $x = 670 + ($i % 2) * 180; $y = 10 + [math]::Floor($i / 2) * 38
     $bt = New-Btn $t[0] $x $y; $bt.Add_Click($t[1]); $t5.Controls.Add($bt); $i++
 }
 $info5 = New-Object Windows.Forms.Label; $info5.Location = '12,262'; $info5.Size = '640,220'

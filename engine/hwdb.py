@@ -410,10 +410,30 @@ PACKAGES = {
     "USBToolBoxKext":     dict(repo="USBToolBox/kext", asset=r"RELEASE\.zip$"),
     "USBToolBoxTool":     dict(repo="USBToolBox/tool", asset=r"^Windows\.exe$"),
     "NootRX":             dict(repo="ChefKissInc/NootRX", asset=r"\.zip$"),
+    # Intel ACPICA Windows tools for SSDTTime / ACPI dump.
+    # Official releases are 32-bit (fine on full Windows, NOT in x64 WinPE which has no WOW64);
+    # the 64-bit builds are produced by build/build-acpica-win64.sh and imported by the ISO build.
+    "ACPICA_iasl":        dict(repo="open-acpica/acpica", asset=r"^iasl\.exe$"),
+    "ACPICA_acpidump":    dict(repo="open-acpica/acpica", asset=r"^acpidump\.exe$"),
+    # Windows apps usable inside WinPE (64-bit, portable)
+    "ExplorerPP":         dict(repo="derceg/explorerplusplus", asset=r"^explorerpp_x64\.zip$", app="Explorer++.exe"),
+    "NotepadPP":          dict(repo="notepad-plus-plus/notepad-plus-plus", asset=r"^npp\.[\d.]+\.portable\.x64\.zip$", app="notepad++.exe"),
+    "OCAT":               dict(repo="ic005k/OCAuxiliaryTools", asset=r"^OCAT-Win64\.zip$", app="OCAuxiliaryTools.exe"),
+    "ACPICA64_iasl":      dict(local=True, file="iasl.exe"),
+    "ACPICA64_acpidump":  dict(local=True, file="acpidump.exe"),
     # direct files
     "AMD_Vanilla":        dict(url="https://raw.githubusercontent.com/AMD-OSX/AMD_Vanilla/master/patches.plist", file="patches.plist"),
     "HfsPlus":            dict(url="https://raw.githubusercontent.com/acidanthera/OcBinaryData/master/Drivers/HfsPlus.efi", file="HfsPlus.efi"),
     "SSDTTime":           dict(url="https://codeload.github.com/corpnewt/SSDTTime/zip/refs/heads/master", file="SSDTTime-master.zip"),
+    "OpCoreSimplify":     dict(url="https://codeload.github.com/lzhoang2801/OpCore-Simplify/zip/refs/heads/main", file="OpCore-Simplify-main.zip"),
+    "HardwareSniffer":    dict(repo="lzhoang2801/Hardware-Sniffer", asset=r"^Hardware-Sniffer-CLI\.exe$"),
+    # Ferramentas TOPS (hnanoto): Windows build lives on release tag 2.0.0 (2.0.1 is macOS-only)
+    "FerramentasTops":    dict(repo="hnanoto/Ferramentas-Tops", tag="2.0.0", multi=True,
+                               asset=r"(?i)\.(exe|zip|ps1|bat|cmd|sh|7z|py)$"),
+    # Portable Git for Windows (bash, git, curl, unzip...) + jq: runs bash-based hackintosh tools
+    "PortableGit":        dict(repo="git-for-windows/git", asset=r"^PortableGit-[\d.]+-64-bit\.7z\.exe$"),
+    "jq":                 dict(repo="jqlang/jq", asset=r"^jq-windows-amd64\.exe$"),
+    "gibMacOS":           dict(url="https://codeload.github.com/corpnewt/gibMacOS/zip/refs/heads/master", file="gibMacOS-master.zip"),
 }
 SSDT_BASE = "https://raw.githubusercontent.com/dortania/Getting-Started-With-ACPI/master/extra-files/compiled/"
 SSDTS = ["SSDT-RTC0-RANGE-HEDT", "SSDT-UNC", "SSDT-PLUG-DRTNIA", "SSDT-EC-USBX-DESKTOP", "SSDT-EC-USBX-LAPTOP", "SSDT-EC-DESKTOP",

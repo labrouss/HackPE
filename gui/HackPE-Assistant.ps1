@@ -6,6 +6,11 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+# Hide the PowerShell console behind the GUI (start-up 'minimized' flags would also minimize the form)
+try {
+    Add-Type -Name ConWin -Namespace HackPE -MemberDefinition '[DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int n);' -ErrorAction Stop
+    $null = [HackPE.ConWin]::ShowWindow([HackPE.ConWin]::GetConsoleWindow(), 0)
+} catch {}
 $ErrorActionPreference = 'Continue'
 
 # =============================================================== paths ====
@@ -246,8 +251,19 @@ function Get-BiosChecklist {
 # ================================================================= form ====
 $Form = New-Object Windows.Forms.Form
 $Form.Text = 'HackPE Assistant'
-$Form.ClientSize = '1000,680'; $Form.StartPosition = 'CenterScreen'
-$Form.FormBorderStyle = 'FixedSingle'; $Form.MaximizeBox = $false; $Form.BackColor = $Col.Bg; $Form.Font = $Fnt.Body
+$Form.ClientSize = '1000,680'; $Form.StartPosition = 'CenterScreen'; $Form.MinimumSize = '1016,719'
+$Form.WindowState = 'Maximized'; $Form.BackColor = [Drawing.Color]::FromArgb(232, 234, 239); $Form.Font = $Fnt.Body
+# Full-screen window: the 1000x680 wizard is a centred card; the sidebar colour fills the left edge
+$Stage = New-Object Windows.Forms.Panel; $Stage.Size = '1000,680'; $Stage.BackColor = $Col.Bg
+$Fill = New-Object Windows.Forms.Panel; $Fill.BackColor = $Col.Side; $Fill.Location = '0,0'
+$Form.Controls.AddRange(@($Stage, $Fill))
+function Center-Stage {
+    $cw = $Form.ClientSize.Width; $ch = $Form.ClientSize.Height
+    $x = [math]::Max(0, [int](($cw - $Stage.Width) / 2)); $y = [math]::Max(0, [int](($ch - $Stage.Height) / 2))
+    $Stage.Location = New-Object Drawing.Point($x, $y)
+    $Fill.Size = New-Object Drawing.Size($x, $ch); $Fill.Visible = ($x -gt 0)
+}
+$Form.Add_Resize({ Center-Stage })
 
 $Side = New-Object Windows.Forms.Panel
 $Side.Location = '0,0'; $Side.Size = '220,680'; $Side.BackColor = $Col.Side
@@ -258,23 +274,23 @@ $SideSteps = New-Object Windows.Forms.Panel; $SideSteps.Location = '0,110'; $Sid
 $Side.Controls.Add($SideSteps)
 $SideFoot = New-Label "OpenCore + macOS`r`nHigh Sierra ... Tahoe 26" 24 600 180 $Fnt.Badge $Col.SideText
 $Side.Controls.Add($SideFoot)
-$Form.Controls.Add($Side)
+$Stage.Controls.Add($Side)
 
 $Title = New-Label '' 250 22 720 $Fnt.Title; $Title.Height = 36
 $Subtitle = New-Label '' 252 60 720 $Fnt.Sub $Col.Sub; $Subtitle.Height = 40
-$Form.Controls.AddRange(@($Title, $Subtitle))
+$Stage.Controls.AddRange(@($Title, $Subtitle))
 
 $Host_ = New-Object Windows.Forms.Panel; $Host_.Location = '250,104'; $Host_.Size = '730,500'
-$Form.Controls.Add($Host_)
+$Stage.Controls.Add($Host_)
 
 $Sep = New-Object Windows.Forms.Label; $Sep.Location = '220,612'; $Sep.Size = '780,1'; $Sep.BackColor = [Drawing.Color]::Gainsboro
-$Form.Controls.Add($Sep)
+$Stage.Controls.Add($Sep)
 $HelpLink = New-Object Windows.Forms.LinkLabel; $HelpLink.Text = 'Need help with this step?'; $HelpLink.Location = '250,634'; $HelpLink.AutoSize = $true
 $ExpertLink = New-Object Windows.Forms.LinkLabel; $ExpertLink.Text = 'Expert mode'; $ExpertLink.Location = '440,634'; $ExpertLink.AutoSize = $true
 $BackBtn = New-Button 'Back' 720 626 120 38
 $NextBtn = New-Button 'Next' 850 626 130 38
 $NextBtn.Font = $Fnt.Bold
-$Form.Controls.AddRange(@($HelpLink, $ExpertLink, $BackBtn, $NextBtn))
+$Stage.Controls.AddRange(@($HelpLink, $ExpertLink, $BackBtn, $NextBtn))
 $Form.AcceptButton = $NextBtn
 $Tips = New-Object Windows.Forms.ToolTip
 
@@ -492,11 +508,18 @@ $ForceBox.Add_CheckedChanged({ Update-Nav })
 $pg = New-Page 'usb'
 $pg.Controls.Add((New-Label ("Plug a USB stick into a port on the back of the PC (directly on the motherboard). It appears below " +
     "automatically. Use at least 8 GB - the macOS download needs 1-3 GB.") 0 0 720))
-$UsbList = New-List 0 56 720 300
-$EraseBox = New-Object Windows.Forms.CheckBox; $EraseBox.Location = '0,368'; $EraseBox.Size = '720,40'; $EraseBox.Font = $Fnt.Bold
+$UsbList = New-List 0 56 720 278
+$EraseBox = New-Object Windows.Forms.CheckBox; $EraseBox.Location = '0,338'; $EraseBox.Size = '720,40'; $EraseBox.Font = $Fnt.Bold
 $EraseBox.Text = 'Select a USB stick above'; $EraseBox.Enabled = $false
-$UsbHint = New-Label 'Tip: avoid USB hubs and front-panel ports - they are a common cause of boot problems.' 0 416 720 $Fnt.Body $Col.Sub
-$pg.Controls.AddRange(@($UsbList, $EraseBox, $UsbHint))
+$UsbHint = New-Label 'Tip: avoid USB hubs and front-panel ports - they are a common cause of boot problems.' 0 462 720 $Fnt.Body $Col.Sub
+$PeBox = New-Object Windows.Forms.CheckBox; $PeBox.Location = '0,428'; $PeBox.Size = '720,26'
+$PeBox.Text = 'Add HackPE to this stick''s OpenCore boot menu (about 2 GB) - one stick for installing and fixing'
+$PeBox.Checked = $IsPE; $PeBox.Enabled = $IsPE
+$Tips.SetToolTip($PeBox, 'Copies this toolkit onto the OPENCORE partition and adds a "HackPE Toolkit" entry to the OpenCore picker. Only available when running from HackPE.')
+$OfflineBox = New-Object Windows.Forms.CheckBox; $OfflineBox.Location = '0,380'; $OfflineBox.Size = '720,44'
+$OfflineBox.Text = "Also put the FULL offline installer on the stick (12-18 GB download now, but no internet needed while installing). Needs a 32 GB+ stick, Big Sur or newer."
+$Tips.SetToolTip($OfflineBox, 'Uses gibMacOS to download Apple''s InstallAssistant.pkg to a second (exFAT) partition. In Recovery you run one Terminal command instead of downloading macOS during the install.')
+$pg.Controls.AddRange(@($UsbList, $EraseBox, $OfflineBox, $PeBox, $UsbHint))
 $UsbTimer = New-Object Windows.Forms.Timer; $UsbTimer.Interval = 3000
 
 function Update-UsbPage([bool]$force = $false) {
@@ -520,7 +543,8 @@ function Update-UsbPage([bool]$force = $false) {
         $sub = New-Label $(if ($why) { $why } else { "Disk $($d.Number)" + $(if ($d.Letters) { "  (currently " + (($d.Letters | ForEach-Object { "${_}:" }) -join ' ') + ")" } else { '' }) }) 30 28 ($w - 40) $Fnt.Body $(if ($why) { $Col.Bad } else { $Col.Sub })
         $rb.Add_CheckedChanged({
             if ($this.Checked) {
-                $State.Disk = $this.Tag.Number; $State.DiskName = "$($this.Tag.Name) ($($this.Tag.GB) GB)"
+                $State.Disk = $this.Tag.Number; $State.DiskName = "$($this.Tag.Name) ($($this.Tag.GB) GB)"; $State.DiskGB = $this.Tag.GB
+                Update-OfflineBox
                 $EraseBox.Enabled = $true; $EraseBox.Checked = $false
                 $EraseBox.Text = "I understand that ALL files on $($State.DiskName) will be permanently erased."
                 Update-Nav
@@ -542,6 +566,15 @@ function Update-UsbPage([bool]$force = $false) {
     Update-Nav
 }
 $UsbTimer.Add_Tick({ if (-not $State.Job) { Update-UsbPage } })
+$OfflineBox.Add_CheckedChanged({ Update-Nav })
+function Update-OfflineBox {
+    $v = $Versions | Where-Object { $_[0] -eq $State.Target } | Select-Object -First 1
+    $ok = $v -and $v[2] -ge 2020
+    $OfflineBox.Enabled = [bool]$ok
+    if (-not $ok) { $OfflineBox.Checked = $false }
+    $disk = $State.DiskGB
+    if ($OfflineBox.Checked -and $disk -and $disk -lt 30) { $OfflineBox.ForeColor = $Col.Bad } else { $OfflineBox.ForeColor = [Drawing.Color]::Black }
+}
 $EraseBox.Add_CheckedChanged({ Update-Nav })
 
 # =========================================================== page: espdisk ====
@@ -649,6 +682,11 @@ function Start-Task([string]$TaskTitle, [string]$TaskSub, $TaskSteps, [string[]]
     Update-Nav
     $State.TaskOnLine = {
         param($l, $live)
+        if ($live -and $l -match '([\d.,]+ \w?B)/([\d.,]+ \w?B) \|.*?(\d{1,3}\.\d{2})%') {   # gibMacOS
+            $ProgBar.Style = 'Continuous'; $ProgBar.Value = [math]::Min(100, [int][double]$Matches[3])
+            $ProgText.Text = "Downloading the full installer: $($Matches[1]) of $($Matches[2])"
+            return
+        }
         if ($l -match '([\d.]+)% downloaded') {
             $ProgBar.Style = 'Continuous'; $ProgBar.Value = [math]::Min(100, [int][double]$Matches[1])
             if ($l -match '([\d.]+)/([\d.]+) MB') { $ProgText.Text = "Downloading macOS: $($Matches[1]) of $($Matches[2]) MB" }
@@ -694,10 +732,16 @@ function Start-CreateInstaller {
     $a = @('make-usb', '--target', $State.Target, '--hw', $HwJson, '--disk', [string]$State.Disk, '--yes', '--out', (Join-Path $Work "EFI-$($State.Target)"))
     switch ($TypeBox.SelectedIndex) { 1 { $a += '--desktop' } 2 { $a += '--laptop' } }
     if ($ForceBox.Checked -or $AnywayBox.Checked) { $a += '--force' }
+    $State.Offline = $OfflineBox.Checked
+    if ($State.Offline) { $a += '--offline' }
+    $State.WithPE = $PeBox.Checked
+    if ($State.WithPE) { $a += '--with-hackpe' }
     $name = ($Versions | Where-Object { $_[0] -eq $State.Target })[0][1]
-    Start-Task 'Creating your installer' "Writing $name to $($State.DiskName). Keep the stick plugged in." `
-        @(@('check', 'Check the USB stick'), @('build', 'Build OpenCore for this PC'), @('format', 'Erase and format the stick'),
-          @('copy', 'Copy OpenCore to the stick'), @('recovery', 'Download macOS from Apple (1-3 GB)')) $a {
+    $steps = @(@('check', 'Check the USB stick'), @('build', 'Build OpenCore for this PC'), @('format', 'Erase and format the stick'),
+               @('copy', 'Copy OpenCore to the stick'), @('recovery', 'Download macOS Recovery from Apple (1-3 GB)'))
+    if ($State.WithPE) { $steps += , @('hackpe', 'Add HackPE to the OpenCore boot menu') }
+    if ($State.Offline) { $steps += , @('offline', 'Download the full offline installer (12-18 GB)') }
+    Start-Task 'Creating your installer' "Writing $name to $($State.DiskName). Keep the stick plugged in." $steps $a {
         $State.UsbRoot = $State.DoneInfo; Show-Page 'done'
     }
 }
@@ -740,8 +784,12 @@ function Get-NextStepsText {
         @('Start from the macOS stick', "Restart, press $($k.Boot) for the boot menu and choose the UEFI entry of the new stick (not the HackPE stick)."),
         @('Choose "macOS Base System"', "In the OpenCore menu pick the entry with 'macOS Base System' or 'Recovery' in the name. Lots of text scrolling is normal - wait 2-10 minutes."),
         @('Erase the target drive', 'Open Disk Utility > View > Show All Devices. Select the whole drive, click Erase: name "Macintosh HD", format APFS, scheme GUID. This deletes everything on it!'),
-        @("Install $name", 'Close Disk Utility and choose Reinstall macOS. The PC restarts several times: each time pick "macOS Installer", later "Macintosh HD", in OpenCore.'),
-        @('Make it boot without the stick', 'When macOS works, start HackPE again and choose "macOS is already installed" on the Welcome page.')
+        $(if ($State.Offline) {
+            @("Install $name (offline)", 'Close Disk Utility, open Utilities > Terminal and type:   sh /Volumes/MACOS-INST/install-offline.sh   - press Enter for "Macintosh HD". No internet needed. The PC restarts several times: pick "macOS Installer", later "Macintosh HD" in OpenCore.')
+        } else {
+            @("Install $name", 'Close Disk Utility and choose Reinstall macOS. The PC restarts several times: each time pick "macOS Installer", later "Macintosh HD", in OpenCore.')
+        }),
+        @('Make it boot without the stick', $(if ($State.WithPE) { 'When macOS works, pick "HackPE Toolkit" in the OpenCore menu of this same stick and choose "macOS is already installed" on the Welcome page.' } else { 'When macOS works, start HackPE again and choose "macOS is already installed" on the Welcome page.' }))
     )
 }
 
@@ -778,7 +826,7 @@ $SaveStepsBtn.Add_Click({ Save-NextSteps $false })
 $NotesBtn.Add_Click({
     $n = $null
     foreach ($c in @((Join-Path $Work "EFI-$($State.Target)\BUILD-NOTES.txt"), $(if ($State.UsbRoot) { Join-Path $State.UsbRoot 'BUILD-NOTES.txt' }))) { if ($c -and (Test-Path $c)) { $n = $c; break } }
-    if ($n) { Start-Process notepad.exe $n } else { Show-Help 'Technical notes are created when an EFI is built.' }
+    if ($n) { $null = Invoke-Engine @('app', 'notepad', $n) } else { Show-Help 'Technical notes are created when an EFI is built.' }
 })
 
 # ======================================================== navigation/help ====
@@ -786,7 +834,7 @@ $Help = @{
     welcome  = "HackPE needs:`n`n- Internet, to download macOS from Apple (Ethernet works best; Android/iPhone USB tethering also works).`n- A second USB stick of 8 GB or more.`n`nNo network? Get the Windows driver (.inf) for your network card on another PC, copy it to a USB stick and use 'Load network driver'."
     pc       = "Green = works, yellow = works with limits, red = not usable.`n`nThe most important part is graphics: macOS needs a supported Intel iGPU or AMD Radeon card. NVIDIA RTX/GTX 16xx and newer have no macOS drivers.`n`nWi-Fi and audio problems do not prevent installation."
     version  = "We recommend the newest version this PC supports.`n`nmacOS 26 Tahoe is the last release for Intel/x86 - the best long-term choice, but onboard audio needs a post-install fix.`nmacOS 15 Sequoia is the safest choice if you need onboard audio immediately."
-    usb      = "Any USB 2.0/3.0 stick of 8 GB or more works. It is erased and formatted as FAT32.`n`nIt must NOT be the HackPE stick. Use a port directly on the motherboard."
+    usb      = "Any USB 2.0/3.0 stick of 8 GB or more works. It is erased and formatted as FAT32.`n`nIt must NOT be the HackPE stick. Use a port directly on the motherboard.`n`nFull offline installer: adds a second exFAT partition with Apple's complete installer (gibMacOS). Choose it when this PC has no working network in macOS Recovery (e.g. unsupported Wi-Fi only). Needs 32 GB+."
     progress = "Building and formatting take about a minute. Downloading macOS takes 5-30 minutes depending on your connection.`n`nIf the download fails, click Try again - the stick does not need to be erased again manually."
     done     = "Common first-boot problems:`n- Stuck on text early: re-check the BIOS checklist (Secure Boot, CSM, Above 4G).`n- 'Prohibited' sign: try another USB port (USB 2.0 port if available).`n- Black screen: connect the monitor to the GPU that HackPE said drives the display.`n`nThe technical notes contain everything that was configured."
     espdisk  = "Pick the drive you erased as 'Macintosh HD' during installation. HackPE only writes the EFI\\OC and EFI\\BOOT folders on its EFI partition (old ones are kept as .bak)."
@@ -818,7 +866,8 @@ function Update-Nav {
         'pc'      { $ok = [bool]$State.Rec -and -not $State.Job
                     if ($ok) { $pl = $State.Plans[$State.Rec]; if ($pl -and -not ($Versions | Where-Object { $pl.compat.($_[0]) -notlike 'no*' })) { $ok = $AnywayBox.Checked } } }
         'version' { $pl = $State.Plans[$State.Target]; $ok = [bool]$State.Target -and $pl -and (-not $pl.blockers -or $ForceBox.Checked) }
-        'usb'     { $NextBtn.Text = 'Create installer'; $ok = ($null -ne $State.Disk) -and $EraseBox.Checked }
+        'usb'     { $NextBtn.Text = 'Create installer'; $ok = ($null -ne $State.Disk) -and $EraseBox.Checked
+                    if ($ok -and $OfflineBox.Checked -and $State.DiskGB -lt 30) { $ok = $false } }
         'espdisk' { $NextBtn.Text = 'Install'; $ok = ($null -ne $State.EspDisk) -and $EspConfirm.Checked -and ($SrcStick.Checked -or $SrcBuild.Checked) }
         'progress' {
             if ($State.Busy) { $BackBtn.Text = 'Cancel'; $NextBtn.Visible = $false }
@@ -838,7 +887,7 @@ function Show-Page([string]$key) {
         'welcome' { $Title.Text = 'Welcome'; $Subtitle.Text = 'Install macOS on this PC in a few guided steps.'; Update-Welcome }
         'pc'      { $Title.Text = 'Your PC'; $Subtitle.Text = 'What macOS thinks of your hardware.'; if (-not $State.Rec -and -not $State.Job) { Start-Detect } else { Update-PcPage } }
         'version' { $Title.Text = 'Choose your macOS version'; $Subtitle.Text = 'The recommended version is pre-selected for you.'; Update-VersionPage }
-        'usb'     { $Title.Text = 'Choose the USB stick'; $Subtitle.Text = 'The macOS installer will be written to it.'; Update-UsbPage $true; $UsbTimer.Start() }
+        'usb'     { $Title.Text = 'Choose the USB stick'; $Subtitle.Text = 'The macOS installer will be written to it.'; Update-UsbPage $true; Update-OfflineBox; $UsbTimer.Start() }
         'espdisk' { $Title.Text = 'Make macOS start on its own'; $Subtitle.Text = 'Install OpenCore to the drive macOS is on.'; Update-EspPage }
         'progress' { }
         'done'    { Update-DonePage }
@@ -884,6 +933,7 @@ $Form.Add_FormClosing({
 })
 
 $Form.Add_Shown({
+    Center-Stage
     Show-Page 'welcome'
     if (-not $Py -or -not (Test-Path $Py)) { Show-Help 'Python was not found next to HackPE - the toolkit cannot run. Rebuild the HackPE media.'; return }
     Start-Preflight

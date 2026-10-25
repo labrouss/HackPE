@@ -9,3 +9,4 @@
 *.inf  -text
 *.sys  binary
 *.cat  binary
+*.sh   text eol=lf

@@ -7,7 +7,7 @@ on:
     paths-ignore: ['**.md', 'docs/**']
   pull_request:
   schedule:
-    - cron: '17 3 1 * *'          # monthly rebuild -> picks up new OpenCore / kext releases
+    - cron: '17 3 * * 1'          # weekly: rebuild with the newest components, publish only if something changed
   workflow_dispatch:
     inputs:
       publish_release:
@@ -15,8 +15,8 @@ on:
         type: boolean
         default: false
       python_version:
-        description: 'Embeddable Python version bundled in WinPE'
-        default: '3.12.10'
+        description: 'Embeddable Python bundled in WinPE (latest = newest stable with a Windows embed build)'
+        default: 'latest'
 
 permissions:
   contents: write                  # needed to create releases
@@ -37,6 +37,25 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Toolchain (MinGW-w64, bison, flex, iasl)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends gcc-mingw-w64-x86-64 bison flex acpica-tools
+
+      - name: Build 64-bit iasl.exe + acpidump.exe from the latest ACPICA release (WinPE has no WOW64)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(gh api repos/acpica/acpica/releases/latest --jq .tag_name 2>/dev/null || true)
+          echo "Latest ACPICA release: ${TAG:-<unknown, using default branch>}"
+          bash build/build-acpica-win64.sh "$TAG" acpica-win64
+          file acpica-win64/*.exe | grep -q 'PE32+' || { echo "not x64"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acpica-win64
+          path: acpica-win64/
+
       - name: Python lint
         run: |
           pip install pyflakes
@@ -53,10 +72,15 @@ jobs:
           }
           exit $bad
 
-      - name: Build EFIs for test hardware + ocvalidate
+      - name: Build EFIs for test hardware + ocvalidate + SSDT auto-generation on real ACPI tables
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python tests/run_tests.py
+        run: |
+          mkdir -p "$RUNNER_TEMP/acpi"
+          for t in /sys/firmware/acpi/tables/*; do [ -f "$t" ] && sudo cp "$t" "$RUNNER_TEMP/acpi/$(basename "$t").aml" || true; done
+          sudo chmod a+r "$RUNNER_TEMP"/acpi/*
+          ls "$RUNNER_TEMP/acpi"
+          python tests/run_tests.py --tables "$RUNNER_TEMP/acpi" --iasl "$(command -v iasl)"
 
   # --------------------------------------------------------------------------
   iso:
@@ -67,6 +91,13 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0                          # full history + tags for the changelog
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: acpica-win64
+          path: ${{ runner.temp }}\acpica-win64
 
       - name: Version
         id: ver
@@ -98,7 +129,7 @@ jobs:
         shell: powershell
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}     # 1000 GitHub API calls/h instead of 60
-          PYVER: ${{ inputs.python_version || '3.12.10' }}
+          PYVER: ${{ inputs.python_version || 'latest' }}
         run: |
           $ErrorActionPreference = 'Stop'
           $out = "$env:RUNNER_TEMP\out"; New-Item -ItemType Directory -Force $out | Out-Null
@@ -108,12 +139,15 @@ jobs:
             IsoPath       = $iso
             Version       = '${{ steps.ver.outputs.version }}'
             PythonVersion = $env:PYVER
+            AcpicaDir     = "$env:RUNNER_TEMP\acpica-win64"
           }
           if (Get-ChildItem drivers -Recurse -Filter *.inf -ErrorAction SilentlyContinue) {
             $params.DriversPath = (Resolve-Path drivers).Path
             Write-Host 'Injecting drivers from ./drivers'
           }
           .\Build-HackPE.ps1 @params
+          Compress-Archive "$env:RUNNER_TEMP\acpica-win64\*" (Join-Path $out 'acpica-win64.zip') -Force
+          Copy-Item "$env:RUNNER_TEMP\build\versions.json" (Join-Path $out 'versions.json') -Force
           $hash = (Get-FileHash $iso -Algorithm SHA256).Hash.ToLower()
           "$hash  $(Split-Path $iso -Leaf)" | Set-Content -Encoding ascii "$iso.sha256"
 
@@ -134,6 +168,29 @@ jobs:
           ``````
           "@ | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
 
+      - name: Release notes (component versions vs previous release + commits)
+        id: notes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'
+          $out = "$env:RUNNER_TEMP\out"
+          $prev = gh release list --limit 30 --json tagName,createdAt --jq '.[].tagName' 2>$null | Where-Object { $_ -and $_ -ne $v } | Select-Object -First 1
+          $prevJson = Join-Path $env:RUNNER_TEMP 'prev-versions.json'
+          if ($prev) {
+            gh release download $prev --pattern versions.json --output $prevJson --clobber 2>$null
+            Write-Host "Previous release: $prev"
+          }
+          $rnArgs = @('build/release_notes.py', '--current', "$out\versions.json", '--version', $v,
+                    '--sha256', (Get-ChildItem "$out\*.sha256" | Select-Object -First 1).FullName, '--out', "$env:RUNNER_TEMP\RELEASE_NOTES.md")
+          if ($prev) { $rnArgs += @('--prev-tag', $prev) }
+          if (Test-Path $prevJson) { $rnArgs += @('--previous', $prevJson) }
+          $res = python @rnArgs
+          $res | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          Get-Content "$env:RUNNER_TEMP\RELEASE_NOTES.md" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          Write-Host $res
+
       - name: Upload ISO artifact
         uses: actions/upload-artifact@v4
         with:
@@ -143,7 +200,7 @@ jobs:
           compression-level: 0
 
       - name: Publish GitHub release
-        if: github.ref_type == 'tag' || inputs.publish_release || github.event_name == 'schedule'
+        if: github.ref_type == 'tag' || inputs.publish_release || (github.event_name == 'schedule' && steps.notes.outputs.changed == 'true')
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -151,7 +208,12 @@ jobs:
           $v = '${{ steps.ver.outputs.version }}'
           $files = (Get-ChildItem "$env:RUNNER_TEMP\out\*").FullName
           $pre = if ('${{ github.ref_type }}' -eq 'tag') { @() } else { @('--prerelease') }
+          $notes = "$env:RUNNER_TEMP\RELEASE_NOTES.md"
           gh release view $v *> $null
-          if ($LASTEXITCODE -eq 0) { gh release upload $v @files --clobber }
-          else { gh release create $v @files --title "HackPE $v" --target '${{ github.sha }}' --generate-notes @pre }
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $v @files --clobber
+            if ($LASTEXITCODE -eq 0) { gh release edit $v --notes-file $notes }
+          } else {
+            gh release create $v @files --title "HackPE $v" --target '${{ github.sha }}' --notes-file $notes @pre
+          }
           if ($LASTEXITCODE -ne 0) { throw 'release failed' }

@@ -21,6 +21,7 @@ import string, subprocess, sys, tempfile, time, urllib.request, urllib.error, uu
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import hwdb  # noqa: E402
+import tools  # noqa: E402
 
 VERSION = "1.0.0"
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -106,6 +107,27 @@ def http(url, dest=None, accept=None, quiet=False, retries=3):
     raise RuntimeError("download failed: %s (%s)" % (url, last))
 
 
+def gh_release_assets(repo, asset_re, tag=None):
+    """All assets matching asset_re of the latest (or a given tag's) release: (tag, [(name, url)])."""
+    rx = re.compile(asset_re)
+    api = "https://api.github.com/repos/%s/releases/%s" % (repo, ("tags/" + tag) if tag else "latest")
+    try:
+        data = json.loads(http(api, accept="application/vnd.github+json", quiet=True))
+        found = [(a["name"], a["browser_download_url"]) for a in data.get("assets", []) if rx.search(a["name"])]
+        return data["tag_name"], found
+    except RuntimeError:
+        pass
+    t = tag
+    if not t:
+        req = urllib.request.Request("https://github.com/%s/releases/latest" % repo, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, context=ssl_ctx(), timeout=60) as r:
+            t = r.geturl().rstrip("/").rsplit("/", 1)[-1]
+    html = http("https://github.com/%s/releases/expanded_assets/%s" % (repo, t), quiet=True).decode("utf-8", "replace")
+    found = [(h.rsplit("/", 1)[-1], "https://github.com" + h)
+             for h in re.findall(r'href="(/[^"]+/releases/download/[^"]+)"', html) if rx.search(h.rsplit("/", 1)[-1])]
+    return t, found
+
+
 def gh_latest(repo, asset_re):
     """Return (tag, asset_name, url). Uses the API, falls back to HTML scraping (rate limits)."""
     rx = re.compile(asset_re)
@@ -171,7 +193,7 @@ class Cache:
 
     def has(self, pkg):
         e = self.manifest.get(pkg)
-        return bool(e) and os.path.isfile(os.path.join(e["_dir"], e["file"]))
+        return bool(e) and os.path.exists(os.path.join(e["_dir"], e["file"]))
 
     def path(self, pkg):
         if not self.has(pkg):
@@ -211,12 +233,46 @@ class Cache:
         entry = dict(entry, _dir=d)
         self.manifest[pkg] = entry
 
+    def import_file(self, pkg, src, tag="local"):
+        d = self.writable()
+        sub = os.path.join(d, "pkg", re.sub(r"[^\w.-]", "_", pkg))
+        os.makedirs(sub, exist_ok=True)
+        dst = os.path.join(sub, os.path.basename(src))
+        shutil.copy2(src, dst)
+        self.save_entry(pkg, d, {"tag": tag, "file": os.path.relpath(dst, d), "url": "import:" + src,
+                                 "fetched": datetime.datetime.now().isoformat(timespec="seconds")})
+        log("  + %-26s %s  <- %s" % (pkg, tag, src))
+
     def fetch(self, pkgs, force=False):
         d = self.writable()
         ok, bad = [], []
         for pkg in pkgs:
             spec = hwdb.PACKAGES[pkg]
+            if spec.get("local"):
+                if not self.has(pkg):
+                    log("  - %-26s provided by the ISO build (build/build-acpica-win64.sh)" % pkg)
+                continue
             try:
+                if spec.get("multi"):
+                    tag, assets = gh_release_assets(spec["repo"], spec["asset"], spec.get("tag"))
+                    cur = self.manifest.get(pkg)
+                    if not force and cur and cur.get("tag") == tag and self.has(pkg):
+                        log("  = %-26s %s (up to date)" % (pkg, tag))
+                        ok.append(pkg)
+                        continue
+                    if not assets:
+                        raise RuntimeError("release %s of %s has no matching assets" % (tag, spec["repo"]))
+                    sub = os.path.join(d, "pkg", pkg)
+                    shutil.rmtree(sub, ignore_errors=True)
+                    os.makedirs(sub)
+                    for name, url in assets:
+                        log("  + %-26s %s  <- %s" % (pkg, tag, url))
+                        http(url, os.path.join(sub, name), quiet=True)
+                    self.save_entry(pkg, d, {"tag": tag, "file": os.path.join("pkg", pkg), "url": spec["repo"],
+                                             "assets": [n for n, _ in assets],
+                                             "fetched": datetime.datetime.now().isoformat(timespec="seconds")})
+                    ok.append(pkg)
+                    continue
                 if "repo" in spec:
                     tag, name, url = gh_latest(spec["repo"], spec["asset"])
                     cur = self.manifest.get(pkg)
@@ -232,8 +288,12 @@ class Cache:
                         continue
                 sub = os.path.join(d, "pkg")
                 os.makedirs(sub, exist_ok=True)
-                log("  + %-26s %s  <- %s" % (pkg, tag, url))
                 http(url, os.path.join(sub, name), quiet=True)
+                if "repo" not in spec:              # direct file: version = content hash (changes only when it does)
+                    import hashlib
+                    with open(os.path.join(sub, name), "rb") as fh:
+                        tag = "sha-" + hashlib.sha256(fh.read()).hexdigest()[:10]
+                log("  + %-26s %s  <- %s" % (pkg, tag, url))
                 self.save_entry(pkg, d, {"tag": tag, "file": os.path.join("pkg", name), "url": url,
                                          "fetched": datetime.datetime.now().isoformat(timespec="seconds")})
                 ok.append(pkg)
@@ -713,6 +773,18 @@ def _kext_exec(kext_dir, bundle_rel):
     return ""
 
 
+def ssdt_kinds(name):
+    """What an SSDT does, from its file name - used to avoid generated + prebuilt duplicates."""
+    n = name.upper()
+    k = set()
+    for kind, rx in (("EC", r"(^|-)EC(-|\.|$)"), ("USBX", r"USBX"), ("PLUG", r"PLUG"), ("RTC", r"AWAC|RTC"),
+                     ("PMC", r"PMC"), ("PNLF", r"PNLF"), ("XOSI", r"XOSI"), ("CPUR", r"CPUR"),
+                     ("RHUB", r"RHUB|USB-RESET"), ("UNC", r"UNC"), ("HPET", r"HPET")):
+        if re.search(rx, n):
+            k.add(kind)
+    return k
+
+
 SCHEMA_ARRAYS = [("ACPI", "Add"), ("ACPI", "Delete"), ("ACPI", "Patch"), ("Booter", "MmioWhitelist"),
                  ("Booter", "Patch"), ("Kernel", "Add"), ("Kernel", "Block"), ("Kernel", "Force"),
                  ("Kernel", "Patch"), ("Misc", "Entries"), ("Misc", "Tools"), ("UEFI", "Drivers"),
@@ -808,15 +880,16 @@ def build_efi(plan, out_dir, cache, ssdt_dir=None, usb_map=None, validate=True):
             templates[(sec, sub)] = dict(arr[0])
 
     # -- ACPI -----------------------------------------------------------------
-    acpi_add, acpi_patch = [], []
+    acpi_add, acpi_patch, covered = [], [], set()
     if ssdt_dir and os.path.isdir(ssdt_dir) and glob.glob(os.path.join(ssdt_dir, "*.aml")):
-        log("Using custom SSDTs from %s" % ssdt_dir)
+        log("Using generated/custom SSDTs from %s" % ssdt_dir)
         for aml in sorted(glob.glob(os.path.join(ssdt_dir, "*.aml"))):
             n = os.path.basename(aml)
-            if n.upper().startswith("DSDT"):
+            if n.upper().startswith(("DSDT", "DMAR")):
                 continue
             shutil.copy2(aml, os.path.join(ocd, "ACPI", n))
             acpi_add.append({"Comment": n, "Enabled": True, "Path": n})
+            covered |= ssdt_kinds(n)
         pf = os.path.join(ssdt_dir, "patches_OC.plist")
         if os.path.isfile(pf):
             extra = plistlib.load(open(pf, "rb"))
@@ -825,15 +898,16 @@ def build_efi(plan, out_dir, cache, ssdt_dir=None, usb_map=None, validate=True):
             for a in extra.get("ACPI", {}).get("Add", []):
                 if a.get("Path") in names:
                     acpi_add = [x for x in acpi_add if x["Path"] != a["Path"]] + [a]
-            log("  merged %d ACPI patches from SSDTTime" % len(acpi_patch))
-    else:
-        for name in plan["ssdts"]:
-            src = cache.path("ssdt:" + name)
-            if not src:
-                W.append("SSDT %s missing from cache - skipped" % name)
-                continue
-            shutil.copy2(src, os.path.join(ocd, "ACPI", name + ".aml"))
-            acpi_add.append({"Comment": name, "Enabled": True, "Path": name + ".aml"})
+            log("  merged %d ACPI patches from patches_OC.plist" % len(acpi_patch))
+    for name in plan["ssdts"]:                 # prebuilt Dortania SSDTs for anything not generated
+        if covered and ssdt_kinds(name) & covered:
+            continue
+        src = cache.path("ssdt:" + name)
+        if not src:
+            W.append("SSDT %s missing from cache - skipped" % name)
+            continue
+        shutil.copy2(src, os.path.join(ocd, "ACPI", name + ".aml"))
+        acpi_add.append({"Comment": name + " (prebuilt)", "Enabled": True, "Path": name + ".aml"})
     cfg["ACPI"]["Add"], cfg["ACPI"]["Delete"], cfg["ACPI"]["Patch"] = acpi_add, [], acpi_patch
 
     # -- Booter -------------------------------------------------------------------
@@ -1127,17 +1201,34 @@ def check_target_disk(num, allow_any=False):
     return d
 
 
-def prep_usb(num, allow_any=False):
+OFFLINE_MIN_GB = 30
+
+
+def prep_usb(num, allow_any=False, offline=False, oc_size_mb=4096):
+    """GPT + FAT32 'OPENCORE' (EFI + recovery). With offline=True also an exFAT 'MACOS-INST'
+    partition for the full installer. Returns (opencore_root, installer_root_or_None)."""
     d = check_target_disk(num, allow_any)
     letter = free_letter("O")
-    size = "" if d["SizeGB"] <= 32 else " size=16000"
-    log("Erasing disk %s (%s, %.1f GB) -> GPT + FAT32 'OPENCORE' as %s:" % (num, d["FriendlyName"], d["SizeGB"], letter))
-    diskpart("select disk %d\nclean\nconvert gpt\ncreate partition primary%s\n"
-             "format fs=fat32 quick label=OPENCORE\nassign letter=%s\nexit\n" % (num, size, letter))
+    if offline:
+        if d["SizeGB"] < OFFLINE_MIN_GB:
+            die("the full offline installer needs a USB stick of at least 32 GB (this one is %.1f GB)" % d["SizeGB"])
+        letter2 = next(l for l in "PQRSTUVWKLMN" if l != letter and not os.path.exists(l + ":\\"))
+        log("Erasing disk %s (%s, %.1f GB) -> GPT: FAT32 'OPENCORE' (%s:) + exFAT 'MACOS-INST' (%s:)"
+            % (num, d["FriendlyName"], d["SizeGB"], letter, letter2))
+        diskpart("select disk %d\nclean\nconvert gpt\ncreate partition primary size=%d\n"
+                 "format fs=fat32 quick label=OPENCORE\nassign letter=%s\ncreate partition primary\n"
+                 "format fs=exfat quick label=MACOS-INST\nassign letter=%s\nexit\n" % (num, oc_size_mb, letter, letter2))
+    else:
+        letter2 = None
+        size = "" if d["SizeGB"] <= 32 else " size=16000"
+        log("Erasing disk %s (%s, %.1f GB) -> GPT + FAT32 'OPENCORE' as %s:" % (num, d["FriendlyName"], d["SizeGB"], letter))
+        diskpart("select disk %d\nclean\nconvert gpt\ncreate partition primary%s\n"
+                 "format fs=fat32 quick label=OPENCORE\nassign letter=%s\nexit\n" % (num, size, letter))
     time.sleep(2)
-    if not os.path.exists(letter + ":\\"):
-        die("volume %s: did not appear after formatting" % letter)
-    return letter + ":\\"
+    for l in filter(None, (letter, letter2)):
+        if not os.path.exists(l + ":\\"):
+            die("volume %s: did not appear after formatting" % l)
+    return letter + ":\\", (letter2 + ":\\" if letter2 else None)
 
 
 def mount_esp(num):
@@ -1197,7 +1288,7 @@ def plan_opts(args):
 
 def default_ssdt_dir():
     d = os.path.join(ROOT, "tools", "SSDTTime", "Results")
-    return d if os.path.isdir(d) else None
+    return d if os.path.isdir(d) and glob.glob(os.path.join(d, "*.aml")) else None
 
 
 def default_usb_map():
@@ -1228,18 +1319,43 @@ def cmd_build(args, cache):
 
 def cmd_make_usb(args, cache):
     stage("check", "Checking the USB stick")
-    check_target_disk(args.disk, args.any_bus)
+    d = check_target_disk(args.disk, args.any_bus)
+    if getattr(args, "offline", False):
+        if hwdb.macos(args.target)["darwin"] < 20:
+            die("full offline installers exist for Big Sur and newer only")
+        if d["SizeGB"] < OFFLINE_MIN_GB:
+            die("the full offline installer needs a USB stick of at least 32 GB (this one is %.1f GB)" % d["SizeGB"])
     stage("build", "Building OpenCore EFI for this PC")
     efi, ok = cmd_build(args, cache)
     confirm("ALL DATA on disk %s will be erased." % args.disk, args.yes)
+    tgt = hwdb.macos(args.target)
+    offline = getattr(args, "offline", False)
+    if offline and tgt["darwin"] < 20:
+        die("full offline installers exist for Big Sur and newer only")
+    with_pe = getattr(args, "with_hackpe", False)
+    media = tools.hackpe_media() if with_pe else None
+    if with_pe and not media:
+        log("warn: HackPE boot media not found - the HackPE boot entry is skipped (only possible when running from HackPE)")
+        with_pe = False
     stage("format", "Erasing and formatting the USB stick")
-    root = prep_usb(args.disk, args.any_bus)
+    root, inst = prep_usb(args.disk, args.any_bus, offline, 8192 if with_pe else 4096)
     stage("copy", "Copying OpenCore to the USB stick")
     copy_efi(efi, root)
     shutil.copy2(os.path.join(os.path.dirname(efi), "BUILD-NOTES.txt"), root)
     if not args.no_recovery:
         stage("recovery", "Downloading macOS from Apple")
         download_recovery(cache, args.target, os.path.join(root, "com.apple.recovery.boot"))
+    if with_pe:
+        stage("hackpe", "Adding HackPE to the OpenCore boot menu")
+        try:
+            tools.add_hackpe(root, media)
+            ocvalidate(cache.extracted("OpenCorePkg"), os.path.join(root, "EFI", "OC", "config.plist"))
+        except Exception as e:
+            log("warn: HackPE boot entry not added: %s" % e)
+    if offline:
+        stage("offline", "Downloading the full offline installer (12-18 GB)")
+        tools.offline_installer(cache, tgt["version"], tgt["darwin"], os.path.join(inst, "macOS-" + args.target))
+        log("Offline install: in Recovery > Terminal run   sh /Volumes/MACOS-INST/install-offline.sh")
     log("")
     log("USB installer ready on %s  ->  boot it on this PC and pick 'macOS Base System' in OpenCore." % root)
     stage("done", root)
@@ -1265,6 +1381,14 @@ def cmd_install_esp(args):
             if os.path.exists(tgt):
                 os.rename(tgt, tgt + ".bak-" + time.strftime("%Y%m%d%H%M%S"))
             shutil.copytree(os.path.join(efi, sub), tgt)
+        if os.path.isfile(os.path.join(dst, "OC", "Tools", tools.HACKPE_TOOL)) or tools.hackpe_media():
+            try:                                     # HackPE entry only if the whole WinPE fits on this ESP
+                if os.path.isdir(os.path.join(dst, "Microsoft")):
+                    raise RuntimeError("Windows boot loader present on this ESP")
+                tools.add_hackpe(letter + ":\\")
+            except Exception as e:
+                tools.remove_hackpe_tool_entry(os.path.join(dst, "OC"))
+                log("HackPE boot entry not installed on this disk (%s) - boot HackPE from the USB stick instead." % e)
         log("OpenCore installed to ESP of disk %s (EFI\\Microsoft untouched)." % args.disk)
     finally:
         unmount_letter(letter)
@@ -1310,6 +1434,7 @@ def ask(prompt, choices=None, default=None):
 
 
 def wizard(cache):
+    tools.maximize_console()
     log("\n  HackPE %s - Hackintosh installer wizard\n" % VERSION)
     if not cache.has("OpenCorePkg"):
         log("The download cache is empty. Connecting to the internet to fetch OpenCore & kexts...")
@@ -1338,7 +1463,7 @@ def wizard(cache):
         log("  disk %s: %s  %.1f GB" % (d["Number"], d["FriendlyName"], d["SizeGB"]))
     num = int(ask("Disk number to ERASE", [str(d["Number"]) for d in disks]))
     confirm("ALL DATA on disk %s will be erased." % num, False)
-    root = prep_usb(num)
+    root, _ = prep_usb(num)
     copy_efi(efi, root)
     shutil.copy2(os.path.join(out, "BUILD-NOTES.txt"), root)
     download_recovery(cache, target, os.path.join(root, "com.apple.recovery.boot"))
@@ -1376,12 +1501,45 @@ def main(argv=None):
     p = sp.add_parser("make-usb"); plan_args(p); p.add_argument("--disk", type=int, required=True)
     p.add_argument("--yes", action="store_true"); p.add_argument("--force", action="store_true")
     p.add_argument("--any-bus", action="store_true"); p.add_argument("--no-recovery", action="store_true")
+    p.add_argument("--offline", action="store_true", help="add exFAT partition with the full installer (Big Sur+, 32 GB stick)")
+    p.add_argument("--with-hackpe", action="store_true", help="also make HackPE bootable from this stick's OpenCore menu")
     p.add_argument("--out"); p.add_argument("--ssdt-dir"); p.add_argument("--usb-map")
     p = sp.add_parser("install-esp"); p.add_argument("--efi", required=True); p.add_argument("--disk", type=int, required=True)
     p.add_argument("--yes", action="store_true")
     p = sp.add_parser("validate"); p.add_argument("config")
     sp.add_parser("wizard")
-    sp.add_parser("status")
+    p = sp.add_parser("tools"); p.add_argument("--run", metavar="KEY", help="run one tool (menu key) and exit")
+    p = sp.add_parser("import"); p.add_argument("--pkg", required=True); p.add_argument("--file", required=True)
+    p.add_argument("--tag", default="local")
+    p = sp.add_parser("acpi-dump"); p.add_argument("--out")
+    p = sp.add_parser("ssdt-auto"); p.add_argument("--hw"); p.add_argument("--tables")
+    p.add_argument("--target", default="tahoe"); p.add_argument("--laptop", dest="laptop", action="store_true", default=None)
+    p.add_argument("--desktop", dest="laptop", action="store_false")
+    sp.add_parser("ssdttime")
+    p = sp.add_parser("app"); p.add_argument("name", choices=list(tools.APPS)); p.add_argument("args", nargs="*")
+    p = sp.add_parser("load-drivers"); p.add_argument("--folder"); p.add_argument("--auto", action="store_true")
+    sp.add_parser("wifi")
+    p = sp.add_parser("backfill-dlls"); p.add_argument("--image", required=True); p.add_argument("scan", nargs="+")
+    sp.add_parser("usbtoolbox")
+    p = sp.add_parser("offline-installer"); p.add_argument("--target", required=True, choices=[m[0] for m in hwdb.MACOS])
+    p.add_argument("--out"); p.add_argument("--list", action="store_true")
+    sp.add_parser("gibmacos")
+    sp.add_parser("opcore-simplify")
+    p = sp.add_parser("hardware-sniffer"); p.add_argument("--out")
+    p = sp.add_parser("run"); p.add_argument("program"); p.add_argument("args", nargs="*")
+    p = sp.add_parser("status"); p.add_argument("--json", action="store_true")
+    sp.add_parser("maximize")
+    p = sp.add_parser("console"); g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--hide", action="store_true"); g.add_argument("--show", action="store_true")
+    p = sp.add_parser("workarea"); p.add_argument("--bottom", type=int, default=0); p.add_argument("--top", type=int, default=0)
+    p = sp.add_parser("windows"); p.add_argument("--json", action="store_true")
+    p = sp.add_parser("focus"); p.add_argument("--hwnd", type=int, required=True)
+    p = sp.add_parser("custom-tools"); p.add_argument("--json", action="store_true")
+    p = sp.add_parser("serial"); p.add_argument("--model", required=True)
+    p = sp.add_parser("mount-esp"); p.add_argument("--disk", type=int, required=True)
+    p = sp.add_parser("add-hackpe"); p.add_argument("--target", required=True, help="root of an OpenCore FAT32 volume, e.g. O:\\")
+    sp.add_parser("tops")
+    sp.add_parser("bash")
     p = sp.add_parser("preflight"); p.add_argument("--json", action="store_true")
 
     a = ap.parse_args(argv)
@@ -1444,6 +1602,40 @@ def main(argv=None):
     elif a.cmd == "preflight":
         r = preflight(cache)
         log(json.dumps(r) if a.json else "\n".join("%-10s %s" % (k, v) for k, v in r.items()))
+    elif a.cmd == "add-hackpe":
+        stage("hackpe", "Adding HackPE to the OpenCore boot menu")
+        tools.add_hackpe(a.target)
+        ok = ocvalidate(cache.extracted("OpenCorePkg"), os.path.join(a.target, "EFI", "OC", "config.plist"))
+        stage("done", a.target)
+        sys.exit(0 if ok else 4)
+    elif a.cmd == "console":
+        tools.console_window(a.show)
+    elif a.cmd == "workarea":
+        tools.set_work_area(a.bottom, a.top)
+    elif a.cmd == "windows":
+        w = tools.list_windows()
+        log(json.dumps([{"hwnd": h, "title": t} for h, t in w]) if a.json else "\n".join("%d  %s" % x for x in w))
+    elif a.cmd == "focus":
+        tools.focus_window(a.hwnd)
+    elif a.cmd == "custom-tools":
+        ct = tools.custom_tools()
+        log(json.dumps(ct) if a.json else "\n".join(ct))
+    elif a.cmd == "serial":
+        sn, mlb = gen_serial(cache.extracted("OpenCorePkg"), a.model)
+        log("Model  %s\nSerial %s\nMLB    %s\nUUID   %s\nROM    %s" % (a.model, sn, mlb, str(uuid.uuid4()).upper(), os.urandom(6).hex().upper()))
+        log("Check the serial at https://checkcoverage.apple.com - it should NOT be valid.")
+    elif a.cmd == "mount-esp":
+        l = mount_esp(a.disk)
+        log("EFI partition of disk %d mounted as %s:  (it stays mounted until reboot)" % (a.disk, l))
+        stage("done", l + ":\\")
+    elif a.cmd == "maximize":
+        tools.maximize_console()
+    elif a.cmd == "tops":
+        sys.exit(tools.run_tops(cache))
+    elif a.cmd == "bash":
+        sys.exit(tools.run_bash())
+    elif a.cmd == "status" and a.json:
+        log(json.dumps({k: cache.manifest[k].get("tag") for k in hwdb.PACKAGES if cache.has(k)}, indent=1, sort_keys=True))
     elif a.cmd == "status":
         log("HackPE %s  python %s  %s" % (VERSION, pyplatform.python_version(), "WinPE" if os.path.exists(
             r"X:\Windows\System32\wpeutil.exe") else pyplatform.platform()))
@@ -1451,6 +1643,55 @@ def main(argv=None):
         for k in hwdb.PACKAGES:
             e = cache.manifest.get(k)
             log("  %-28s %s" % (k, (e.get("tag") + "  " + e.get("fetched", "")) if e and cache.has(k) else "-- missing --"))
+    elif a.cmd == "import":
+        cache.import_file(a.pkg, a.file, a.tag)
+    elif a.cmd == "tools":
+        if a.run:
+            tools.run_tool(a.run, cache, sys.modules[__name__])
+        else:
+            tools.tools_menu(cache, sys.modules[__name__])
+    elif a.cmd == "acpi-dump":
+        stage("dump", "Dumping ACPI tables")
+        out = tools.acpi_dump(cache, a.out)
+        stage("done", out)
+    elif a.cmd == "ssdt-auto":
+        hw = load_hw(a.hw) if a.hw else run_detect()[0]
+        plan = build_plan(hw, a.target, {"laptop": a.laptop} if a.laptop is not None else {})
+        stage("ssdt", "Generating SSDTs")
+        res, amls = tools.ssdt_auto(cache, plan, a.tables)
+        if not amls:
+            die("no SSDTs were generated")
+        stage("done", res)
+    elif a.cmd == "app":
+        sys.exit(tools.launch_app(cache, a.name, a.args))
+    elif a.cmd == "load-drivers":
+        if a.auto:
+            tools.auto_load_drivers()
+        elif a.folder:
+            tools.load_drivers(a.folder)
+    elif a.cmd == "wifi":
+        tools.wifi_connect()
+    elif a.cmd == "backfill-dlls":
+        tools.backfill_dlls(a.image, a.scan)
+    elif a.cmd == "ssdttime":
+        sys.exit(tools.run_ssdttime(cache))
+    elif a.cmd == "offline-installer":
+        t = hwdb.macos(a.target)
+        if not a.list and not a.out:
+            die("--out is required (an exFAT/NTFS location: files are larger than 4 GB)")
+        stage("offline", "Downloading the full offline installer")
+        tools.offline_installer(cache, t["version"], t["darwin"], a.out or tempfile.gettempdir(), a.list)
+        stage("done", a.out or "")
+    elif a.cmd == "opcore-simplify":
+        sys.exit(tools.run_opcore_simplify(cache))
+    elif a.cmd == "hardware-sniffer":
+        sys.exit(tools.run_hardware_sniffer(cache, a.out)[0])
+    elif a.cmd == "gibmacos":
+        sys.exit(tools.run_gibmacos(cache))
+    elif a.cmd == "usbtoolbox":
+        tools.run_usbtoolbox(cache)
+    elif a.cmd == "run":
+        sys.exit(tools.run_program(a.program, a.args))
     elif a.cmd == "wizard" or a.cmd is None:
         wizard(cache)
 

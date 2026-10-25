@@ -5,3 +5,7 @@ HackPE-Build/
 cache/
 data/cacert.pem
 python/
+tools/SSDTTime/
+tools/SSDTTime-*/
+usbmap/
+acpica-win64/
