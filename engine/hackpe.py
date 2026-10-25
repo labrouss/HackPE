@@ -713,6 +713,34 @@ def _kext_exec(kext_dir, bundle_rel):
     return ""
 
 
+SCHEMA_ARRAYS = [("ACPI", "Add"), ("ACPI", "Delete"), ("ACPI", "Patch"), ("Booter", "MmioWhitelist"),
+                 ("Booter", "Patch"), ("Kernel", "Add"), ("Kernel", "Block"), ("Kernel", "Force"),
+                 ("Kernel", "Patch"), ("Misc", "Entries"), ("Misc", "Tools"), ("UEFI", "Drivers"),
+                 ("UEFI", "ReservedMemory")]
+
+
+def conform_entry(entry, template):
+    """Give an array entry exactly the key set of this OpenCore release's Sample.plist entry:
+    keys we did not set inherit the sample value, keys OpenCore no longer knows are dropped."""
+    out = {}
+    for k, v in template.items():
+        if k in entry:
+            out[k] = entry[k]
+        elif k == "Enabled":
+            out[k] = True
+        elif isinstance(v, bool):
+            out[k] = False
+        elif isinstance(v, str):
+            out[k] = ""
+        elif isinstance(v, bytes):
+            out[k] = b""
+        elif isinstance(v, int):
+            out[k] = 0
+        else:
+            out[k] = v
+    return out
+
+
 def _kext_entry(bundle_path, exe, comment="", mink="", maxk=""):
     return {"Arch": "Any", "BundlePath": bundle_path, "Comment": comment, "Enabled": True,
             "ExecutablePath": exe, "MaxKernel": maxk, "MinKernel": mink, "PlistPath": "Contents/Info.plist"}
@@ -771,6 +799,13 @@ def build_efi(plan, out_dir, cache, ssdt_dir=None, usb_map=None, validate=True):
     cfg = plistlib.load(open(os.path.join(oc, "Docs", "Sample.plist"), "rb"))
     for key in [k for k in cfg if k.startswith("#")]:
         del cfg[key]
+    # Remember one sample entry per array section: OpenCore adds keys between releases
+    # (e.g. UEFI/Drivers/HideVerbose in 1.0.8) - entries are conformed to these templates.
+    templates = {}
+    for sec, sub in SCHEMA_ARRAYS:
+        arr = cfg.get(sec, {}).get(sub)
+        if isinstance(arr, list) and arr and isinstance(arr[0], dict):
+            templates[(sec, sub)] = dict(arr[0])
 
     # -- ACPI -----------------------------------------------------------------
     acpi_add, acpi_patch = [], []
@@ -915,6 +950,9 @@ def build_efi(plan, out_dir, cache, ssdt_dir=None, usb_map=None, validate=True):
         cfg["UEFI"]["APFS"].update(MinDate=-1, MinVersion=-1)
     if plan["flex_ratio"]:
         cfg["UEFI"]["Quirks"]["IgnoreInvalidFlexRatio"] = True
+
+    for (sec, sub), tpl in templates.items():
+        cfg[sec][sub] = [conform_entry(e, tpl) for e in cfg[sec][sub]]
 
     cfgp = os.path.join(ocd, "config.plist")
     with open(cfgp, "wb") as fh:

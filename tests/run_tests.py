@@ -83,7 +83,10 @@ def main():
             efi, ok, _ = hackpe.build_efi(plan, out, cache, validate=False)
             cfg = os.path.join(efi, "OC", "config.plist")
             r = subprocess.run([ocv, cfg], capture_output=True, text=True)
-            check(r.returncode == 0 and "No issues found" in r.stdout, "%s/%s ocvalidate" % (fx, key))
+            good = r.returncode == 0 and "No issues found" in r.stdout
+            check(good, "%s/%s ocvalidate" % (fx, key))
+            if not good:
+                print("        " + (r.stdout + r.stderr).strip().replace("\n", "\n        "))
             p = plistlib.load(open(cfg, "rb"))
             check(p["Kernel"]["Add"][0]["BundlePath"] == "Lilu.kext", "%s/%s Lilu loads first" % (fx, key))
             check(p["PlatformInfo"]["Generic"]["SystemSerialNumber"] != "W00000000001", "%s/%s serial generated" % (fx, key))
