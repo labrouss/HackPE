@@ -9,3 +9,8 @@ tools/SSDTTime/
 tools/SSDTTime-*/
 usbmap/
 acpica-win64/
+
+# web page (Config Compare)
+web/node_modules/
+web/dist/
+web/dist-single/

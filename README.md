@@ -105,6 +105,27 @@ The image is about 6 GB once written, so it fits any 8 GB+ stick:
 
 The WinPE licensing note above applies to the image just as it does to the ISO.
 
+## Config Compare (web page)
+
+A browser tool in `web/` (React + Vite) that compares two OpenCore `config.plist` files. It's published to GitHub Pages by `.github/workflows/pages.yml`. The files never leave the browser.
+
+- **Plan:** every difference, each with an explanation, sorted by severity: **boot-critical**, **hardware-specific**, **this PC only** (serials, MLB, UUID, ROM, which are never copied), **cosmetic/debug** and **inactive** (disabled leftovers). Tick the steps you want, then *Download matched config* to get the target with those changes applied, or *Copy plan as checklist* for Markdown. The page also lists the `.aml`, `.kext` and `.efi` files the target EFI needs.
+- **OpenCore-aware matching:**
+  - Kexts, SSDTs, ACPI and kernel patches, drivers and tools are matched by name, not by position.
+  - Values are decoded: boot-args token by token, SIP flags, ScanPolicy, CPUID spoof generation, framebuffer and device IDs, audio layout.
+  - A kext load order that differs from the reference is flagged.
+- **Health check** of both files. It finds plugins that load before their parent kext, Lilu not first, kexts loaded twice, conflicting kexts (AppleALC + VoodooHDA, itlwm + AirportItlwm, UTBMap + UTBDefault…), OpenCanopy missing for the External picker, debug boot-args, AppleALC on Tahoe, and disabled Sample.plist leftovers.
+- **Browse configs:** both files as one tree on the same layout as the plan (reference | key | target), with search, an "only differences" filter and decoded values. *Show in the config browser* on any plan step jumps to that key.
+
+```bash
+cd web && npm install
+npm run dev            # local dev server
+npm test               # engine tests (Node's built-in runner, no extra packages)
+npm run build:single   # dist-single/index.html: one self-contained file that works offline
+```
+
+One-time setup for Pages: **Settings > Pages > Source: GitHub Actions**. The site is then at `https://<user>.github.io/<repo>/`, with the single-file version alongside it as `hackpe-config-compare.html`.
+
 ## Use it: the HackPE Assistant
 
 Boot the target PC from the HackPE stick (UEFI mode, Secure Boot off). The **Assistant** starts and walks you through each step in plain language:
@@ -289,7 +310,9 @@ build/                build-acpica-win64.sh (64-bit iasl/acpidump for WinPE), ma
 tools/custom/         your own tools, baked into the ISO
 tests/                regression tests + hardware fixtures (run in CI)
 drivers/              optional extra WinPE drivers (injected by CI)
-.github/workflows/    build-iso.yml (test + ISO + release), build-image.yml (USB image -> same release)
+.github/workflows/    build-iso.yml (test + ISO + release), build-image.yml (USB image -> same release),
+                      pages.yml (Config Compare web page -> GitHub Pages)
+web/                  Config Compare: React page that compares two config.plist files (engine in web/src/engine)
 data/                 cacert.pem (downloaded at build)
 ```
 
