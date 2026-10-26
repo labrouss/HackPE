@@ -115,6 +115,7 @@ A browser tool in `web/` (React + Vite) that compares two OpenCore `config.plist
   - Values are decoded: boot-args token by token, SIP flags, ScanPolicy, CPUID spoof generation, framebuffer and device IDs, audio layout.
   - A kext load order that differs from the reference is flagged.
 - **Health check** of both files. It finds plugins that load before their parent kext, Lilu not first, kexts loaded twice, conflicting kexts (AppleALC + VoodooHDA, itlwm + AirportItlwm, UTBMap + UTBDefault…), OpenCanopy missing for the External picker, debug boot-args, AppleALC on Tahoe, and disabled Sample.plist leftovers.
+- **Light and dark theme:** the switch is in the top bar. It starts from your system setting and remembers your choice.
 - **Browse configs:** both files as one tree on the same layout as the plan (reference | key | target), with search, an "only differences" filter and decoded values. *Show in the config browser* on any plan step jumps to that key.
 
 ```bash

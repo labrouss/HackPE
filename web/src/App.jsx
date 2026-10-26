@@ -257,6 +257,48 @@ function Health({ result, names }) {
   );
 }
 
+// ----------------------------------------------------------------- theme ----
+const THEME_KEY = 'hackpe-theme';
+function useTheme() {
+  const [theme, setTheme] = useState(() => document.documentElement.getAttribute('data-theme') || 'light');
+  useEffect(() => { document.documentElement.setAttribute('data-theme', theme); }, [theme]);
+  useEffect(() => {                                    // follow the system until the user picks a theme
+    const mq = window.matchMedia?.('(prefers-color-scheme: dark)');
+    if (!mq) return undefined;
+    const onChange = (e) => {
+      let saved = null;
+      try { saved = localStorage.getItem(THEME_KEY); } catch { /* storage blocked */ }
+      if (!saved) setTheme(e.matches ? 'dark' : 'light');
+    };
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+  const toggle = () => setTheme((t) => {
+    const next = t === 'dark' ? 'light' : 'dark';
+    try { localStorage.setItem(THEME_KEY, next); } catch { /* storage blocked: still switches for this visit */ }
+    return next;
+  });
+  return [theme, toggle];
+}
+
+function ThemeSwitch() {
+  const [theme, toggle] = useTheme();
+  const dark = theme === 'dark';
+  return (
+    <button type="button" className="theme" role="switch" aria-checked={dark} onClick={toggle}
+      title={dark ? 'Switch to the light theme' : 'Switch to the dark theme'}>
+      <span className="theme-track" aria-hidden="true">
+        <span className="theme-knob">
+          {dark
+            ? <svg viewBox="0 0 12 12"><path d="M9.5 7.5A4 4 0 0 1 4.5 2.5a4 4 0 1 0 5 5z" /></svg>
+            : <svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="2.2" /><path d="M6 .8v1.2M6 10v1.2M.8 6H2M10 6h1.2M2.3 2.3l.8.8M8.9 8.9l.8.8M2.3 9.7l.8-.8M8.9 3.1l.8-.8" /></svg>}
+        </span>
+      </span>
+      Dark theme
+    </button>
+  );
+}
+
 // ------------------------------------------------------------------- app ----
 export default function App() {
   const [docs, setDocs] = useState({ ref: null, target: null });
@@ -282,6 +324,7 @@ export default function App() {
         </a>
         <span className="top-title">Config compare</span>
         <span className="top-note">Everything runs in your browser. Your config files are never uploaded.</span>
+        <ThemeSwitch />
       </header>
 
       <section className="hero">
