@@ -57,7 +57,7 @@ $Fnt = @{
 # =============================================================== state ====
 $State = @{
     Mode = 'install'; Pre = $null; Hw = $null; Plans = @{}; Rec = $null; Target = $null
-    Disk = $null; DiskName = ''; UsbRoot = $null; EspDisk = $null; Force = $false
+    Disk = $null; DiskName = ''; UsbRoot = $null; EspDisk = $null; Force = $false; InPlace = $false
     Busy = $false; Failed = $null; DiskSig = ''; Started = $null; LastJob = $null
 }
 $Versions = @(
@@ -202,6 +202,13 @@ function Get-Plan([string]$target) {
     $p
 }
 
+# Results live in the engine's output folder: <stick>\HackPE\output\<PC>\efi\<target>
+function Get-EfiDir([string]$t) {
+    $d = $null
+    try { $d = ((& $Py $Engine paths --target $t --json 2>$null | Out-String) | ConvertFrom-Json).efi } catch {}
+    if ($d) { $d } else { Join-Path $Work "EFI-$t" }
+}
+
 function Get-UsbDisks {
     # Native & fast (called every few seconds while the USB page is open)
     $res = @()
@@ -211,8 +218,11 @@ function Get-UsbDisks {
         $letters = @($parts | Where-Object { $_.DiskNumber -eq $d.Number } | ForEach-Object { [string]$_.DriveLetter })
         $hack = $false
         foreach ($l in $letters) { if ((Test-Path "${l}:\sources\boot.wim") -and (Test-Path "${l}:\HackPE")) { $hack = $true } }
+        # Flashed from HackPE-usb.img: has HACKPE + MACOS volumes -> finish it in place (prepare-stick)
+        $labels = @(Get-Partition -DiskNumber $d.Number -ErrorAction SilentlyContinue | Get-Volume -ErrorAction SilentlyContinue | ForEach-Object { $_.FileSystemLabel })
+        $img = $hack -and ($labels -contains 'HACKPE') -and ($labels -contains 'MACOS')
         $res += [pscustomobject]@{ Number = $d.Number; Name = $d.FriendlyName; Bus = "$($d.BusType)"
-            GB = [math]::Round($d.Size / 1GB, 1); System = ($d.IsBoot -or $d.IsSystem); HackPE = $hack; Letters = $letters }
+            GB = [math]::Round($d.Size / 1GB, 1); System = ($d.IsBoot -or $d.IsSystem); HackPE = $hack; Image = $img; Letters = $letters }
     }
     $res
 }
@@ -532,21 +542,32 @@ function Update-UsbPage([bool]$force = $false) {
     $usable = 0
     foreach ($d in $disks) {
         $why = $null
-        if ($d.HackPE) { $why = 'This is the HackPE stick you started from - use a different one.' }
+        if ($d.HackPE -and -not $d.Image) { $why = 'This is the HackPE stick you started from - use a different one.' }
         elseif ($d.System) { $why = 'This disk is in use by the running system.' }
         elseif ($d.GB -lt 3.5) { $why = ('Too small ({0} GB) - at least 4 GB is needed.' -f $d.GB) }
         $row = New-Object Windows.Forms.Panel; $row.Size = New-Object Drawing.Size($w, 52); $row.BackColor = $Col.RowBg
         $row.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 6)
         $rb = New-Object Windows.Forms.RadioButton
-        $rb.Text = "{0}   -   {1} GB" -f $d.Name, $d.GB; $rb.Font = $Fnt.Bold; $rb.Location = '12,6'; $rb.Size = New-Object Drawing.Size(($w - 24), 22)
+        $rb.Text = "{0}   -   {1} GB" -f $d.Name, $d.GB
+        if ($d.Image) { $rb.Text = "This HackPE stick (recommended)   -   {0}, {1} GB" -f $d.Name, $d.GB }
+        $rb.Font = $Fnt.Bold; $rb.Location = '12,6'; $rb.Size = New-Object Drawing.Size(($w - 24), 22)
         $rb.Tag = $d; $rb.Enabled = (-not $why)
-        $sub = New-Label $(if ($why) { $why } else { "Disk $($d.Number)" + $(if ($d.Letters) { "  (currently " + (($d.Letters | ForEach-Object { "${_}:" }) -join ' ') + ")" } else { '' }) }) 30 28 ($w - 40) $Fnt.Body $(if ($why) { $Col.Bad } else { $Col.Sub })
+        $subText = if ($d.Image) { 'No second stick needed and nothing is erased: OpenCore for this PC and macOS are added to it.' } else { $null }
+        $sub = New-Label $(if ($why) { $why } elseif ($subText) { $subText } else { "Disk $($d.Number)" + $(if ($d.Letters) { "  (currently " + (($d.Letters | ForEach-Object { "${_}:" }) -join ' ') + ")" } else { '' }) }) 30 28 ($w - 40) $Fnt.Body $(if ($why) { $Col.Bad } else { $Col.Sub })
         $rb.Add_CheckedChanged({
             if ($this.Checked) {
                 $State.Disk = $this.Tag.Number; $State.DiskName = "$($this.Tag.Name) ($($this.Tag.GB) GB)"; $State.DiskGB = $this.Tag.GB
+                $State.InPlace = [bool]$this.Tag.Image
                 Update-OfflineBox
-                $EraseBox.Enabled = $true; $EraseBox.Checked = $false
-                $EraseBox.Text = "I understand that ALL files on $($State.DiskName) will be permanently erased."
+                if ($State.InPlace) {
+                    $EraseBox.Checked = $true; $EraseBox.Enabled = $false
+                    $EraseBox.Text = 'Nothing will be erased - the EFI and macOS are added to the HackPE stick.'
+                    $PeBox.Checked = $false; $PeBox.Enabled = $false
+                } else {
+                    $EraseBox.Enabled = $true; $EraseBox.Checked = $false
+                    $EraseBox.Text = "I understand that ALL files on $($State.DiskName) will be permanently erased."
+                    $PeBox.Enabled = $IsPE; $PeBox.Checked = $IsPE
+                }
                 Update-Nav
             }
         })
@@ -560,7 +581,7 @@ function Update-UsbPage([bool]$force = $false) {
     } elseif ($usable -eq 0) {
         $UsbList.Controls.Add((New-Row 'warn' 'Insert another USB stick' 'None of the connected sticks can be used (see the reasons above).' $w))
     }
-    if (-not ($disks | Where-Object { $_.Number -eq $State.Disk -and -not $_.HackPE })) {
+    if (-not ($disks | Where-Object { $_.Number -eq $State.Disk -and (-not $_.HackPE -or $_.Image) })) {
         $State.Disk = $null; $EraseBox.Enabled = $false; $EraseBox.Checked = $false; $EraseBox.Text = 'Select a USB stick above'
     }
     Update-Nav
@@ -729,7 +750,8 @@ function Start-Task([string]$TaskTitle, [string]$TaskSub, $TaskSteps, [string[]]
 }
 
 function Start-CreateInstaller {
-    $a = @('make-usb', '--target', $State.Target, '--hw', $HwJson, '--disk', [string]$State.Disk, '--yes', '--out', (Join-Path $Work "EFI-$($State.Target)"))
+    if ($State.InPlace) { Start-PrepareStick; return }
+    $a = @('make-usb', '--target', $State.Target, '--hw', $HwJson, '--disk', [string]$State.Disk, '--yes')
     switch ($TypeBox.SelectedIndex) { 1 { $a += '--desktop' } 2 { $a += '--laptop' } }
     if ($ForceBox.Checked -or $AnywayBox.Checked) { $a += '--force' }
     $State.Offline = $OfflineBox.Checked
@@ -746,17 +768,34 @@ function Start-CreateInstaller {
     }
 }
 
+function Start-PrepareStick {
+    $a = @('prepare-stick', '--target', $State.Target, '--hw', $HwJson)
+    switch ($TypeBox.SelectedIndex) { 1 { $a += '--desktop' } 2 { $a += '--laptop' } }
+    if ($ForceBox.Checked -or $AnywayBox.Checked) { $a += '--force' }
+    $State.Offline = $OfflineBox.Checked
+    if ($State.Offline) { $a += '--offline' }
+    $State.WithPE = $true
+    $name = ($Versions | Where-Object { $_[0] -eq $State.Target })[0][1]
+    $steps = @(@('check', 'Check the HackPE stick'), @('build', 'Build OpenCore for this PC'),
+               @('copy', 'Install OpenCore on the stick'), @('recovery', 'Download macOS Recovery from Apple (1-3 GB)'))
+    if ($State.Offline) { $steps += , @('offline', 'Download the full offline installer (12-18 GB)') }
+    Start-Task 'Preparing your stick' "Adding $name to the HackPE stick. Keep it plugged in." $steps $a {
+        $State.UsbRoot = $State.DoneInfo; Show-Page 'done'
+    }
+}
+
 function Start-InstallEsp {
     if ($SrcStick.Checked -and $SrcStick.Tag) {
         Start-Task 'Installing OpenCore' 'Copying OpenCore to the EFI partition of your macOS drive.' `
             @(@('mount', 'Open the EFI partition'), @('copy', 'Install OpenCore')) @('install-esp', '--efi', $SrcStick.Tag, '--disk', [string]$State.EspDisk, '--yes') { Show-Page 'done' }
     } else {
-        $t = $Versions[$SrcTarget.SelectedIndex][0]; $out = Join-Path $Work "EFI-post-$t"
+        $t = $Versions[$SrcTarget.SelectedIndex][0]
         if (-not (Test-Path $HwJson)) { & $Py $Engine detect --out $HwJson | Out-Null }
+        $out = Get-EfiDir $t
         $State.PostChain = @('install-esp', '--efi', $out, '--disk', [string]$State.EspDisk, '--yes')
         Start-Task 'Installing OpenCore' 'Building a fresh OpenCore and installing it to your macOS drive.' `
             @(@('build', 'Build OpenCore for this PC'), @('mount', 'Open the EFI partition'), @('copy', 'Install OpenCore')) `
-            @('build-efi', '--target', $t, '--hw', $HwJson, '--out', $out, '--force') {
+            @('build-efi', '--target', $t, '--hw', $HwJson, '--force') {
                 $State.OnSuccess = { Show-Page 'done' }
                 $State.Busy = $true; Update-Nav
                 Start-EngineJob $State.PostChain $State.TaskOnLine $State.TaskOnExit
@@ -825,7 +864,7 @@ function Save-NextSteps([bool]$quiet) {
 $SaveStepsBtn.Add_Click({ Save-NextSteps $false })
 $NotesBtn.Add_Click({
     $n = $null
-    foreach ($c in @((Join-Path $Work "EFI-$($State.Target)\BUILD-NOTES.txt"), $(if ($State.UsbRoot) { Join-Path $State.UsbRoot 'BUILD-NOTES.txt' }))) { if ($c -and (Test-Path $c)) { $n = $c; break } }
+    foreach ($c in @((Join-Path (Get-EfiDir $State.Target) 'BUILD-NOTES.txt'), $(if ($State.UsbRoot) { Join-Path $State.UsbRoot 'BUILD-NOTES.txt' }))) { if ($c -and (Test-Path $c)) { $n = $c; break } }
     if ($n) { $null = Invoke-Engine @('app', 'notepad', $n) } else { Show-Help 'Technical notes are created when an EFI is built.' }
 })
 

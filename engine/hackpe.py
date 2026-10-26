@@ -310,12 +310,40 @@ def run_detect(out=None):
     if not IS_WIN:
         die("live detection needs Windows/WinPE. Use --hw <file.json> on other systems.")
     ps1 = os.path.join(ENGINE_DIR, "detect.ps1")
-    out = out or os.path.join(tempfile.gettempdir(), "hackpe-hw.json")
+    out = out or os.path.join(tools.work_dir(), "hw.json")
     r = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1, "-Out", out],
                        capture_output=True, text=True)
     if not os.path.isfile(out):
         die("detect.ps1 failed:\n" + r.stdout + r.stderr)
-    return load_hw(out), out
+    hw = load_hw(out)
+    save_hardware(hw, out)
+    return hw, out
+
+
+def hw_summary(hw):
+    f = analyze(hw)
+    lines = ["CPU      : %s -> %s" % (hw["Cpu"].get("Name"), hwdb.PLATFORMS[f["platform"]]["name"]),
+             "System   : %s | %s | %s | firmware %s" % (f["vendor"], f["board"], "laptop" if f["laptop"] else "desktop", f["firmware"])]
+    lines += ["GPU      : %s [%s] %s" % (g["name"], g["status"], g["notes"]) for g in f["gpus"]]
+    lines += ["Ethernet : %s" % n["name"] for n in f["nics"]]
+    lines += ["Wi-Fi    : %s" % w["name"] for w in f["wifi"]]
+    lines += ["Audio    : %s" % c for c in f["codecs"]]
+    return lines
+
+
+def save_hardware(hw, src=None):
+    """Keep the detection of this PC in output\\<PC>\\hardware (hw.json + readable report)."""
+    try:
+        d = tools.pc_dir("hardware", hw=hw)
+        with open(os.path.join(d, "hw.json"), "w", encoding="utf-8") as fh:
+            json.dump(hw, fh, indent=1)
+        with open(os.path.join(d, "report.txt"), "w", encoding="utf-8") as fh:
+            fh.write("HackPE hardware report - %s\n\n" % datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
+            fh.write("\n".join(hw_summary(hw)) + "\n")
+        return d
+    except Exception as e:
+        log("warn: could not save the hardware report (%s)" % e)
+        return None
 
 
 def load_hw(path):
@@ -1069,6 +1097,79 @@ def build_efi(plan, out_dir, cache, ssdt_dir=None, usb_map=None, validate=True):
     return efi, ok, W
 
 
+STARTER_MARK = "HACKPE-STARTER.txt"
+
+
+def build_starter_efi(cache, out_dir, validate=True):
+    """Generic OpenCore for the HackPE disk image: no kexts/ACPI/SMBIOS for any PC, it only shows the
+    picker - HackPE (WinPE on the HACKPE partition, found by ScanPolicy 0) and later macOS recovery.
+    HackPE replaces it with the EFI built for the user's PC (prepare-stick)."""
+    if not cache.has("OpenCorePkg"):
+        die("OpenCorePkg is not in the cache. Run 'fetch --only OpenCorePkg' first.")
+    oc = cache.extracted("OpenCorePkg")
+    efi = os.path.join(out_dir, "EFI")
+    if os.path.exists(efi):
+        shutil.rmtree(efi)
+    shutil.copytree(os.path.join(oc, "X64", "EFI"), efi)
+    ocd = os.path.join(efi, "OC")
+    drivers = ["OpenRuntime.efi", "ResetNvramEntry.efi"]
+    hfs = cache.path("HfsPlus")
+    if hfs:
+        shutil.copy2(hfs, os.path.join(ocd, "Drivers", "HfsPlus.efi"))
+        drivers.insert(0, "HfsPlus.efi")
+    else:
+        drivers.insert(0, "OpenHfsPlus.efi")
+    for fn in os.listdir(os.path.join(ocd, "Drivers")):
+        if fn not in drivers:
+            os.remove(os.path.join(ocd, "Drivers", fn))
+    for fn in os.listdir(os.path.join(ocd, "Tools")):
+        if fn != "OpenShell.efi":
+            os.remove(os.path.join(ocd, "Tools", fn))
+    for sub in ("ACPI", "Kexts"):
+        d = os.path.join(ocd, sub)
+        for fn in os.listdir(d) if os.path.isdir(d) else []:
+            q = os.path.join(d, fn)
+            shutil.rmtree(q) if os.path.isdir(q) else os.remove(q)
+
+    cfg = plistlib.load(open(os.path.join(oc, "Docs", "Sample.plist"), "rb"))
+    for key in [k for k in cfg if k.startswith("#")]:
+        del cfg[key]
+    templates = {}
+    for sec, sub in SCHEMA_ARRAYS:
+        arr = cfg.get(sec, {}).get(sub)
+        if isinstance(arr, list) and arr and isinstance(arr[0], dict):
+            templates[(sec, sub)] = dict(arr[0])
+    cfg["ACPI"]["Add"], cfg["ACPI"]["Delete"], cfg["ACPI"]["Patch"] = [], [], []
+    cfg["Booter"]["MmioWhitelist"], cfg["Booter"]["Patch"] = [], []
+    cfg["DeviceProperties"]["Add"], cfg["DeviceProperties"]["Delete"] = {}, {}
+    for k in ("Add", "Block", "Force", "Patch"):
+        cfg["Kernel"][k] = []
+    m = cfg["Misc"]
+    m["Boot"].update(Timeout=10, PickerMode="Builtin", ShowPicker=True, HideAuxiliary=True, PickerAttributes=17)
+    m["Security"].update(AllowSetDefault=True, ScanPolicy=0, Vault="Optional", SecureBootModel="Disabled")
+    m["Entries"] = []
+    m["Tools"] = [{"Arguments": "", "Auxiliary": True, "Comment": "UEFI Shell", "Enabled": True,
+                   "Flavour": "OpenShell:UEFIShell:Shell", "FullNvramAccess": False, "Name": "UEFI Shell",
+                   "Path": "OpenShell.efi", "RealPath": False, "TextMode": False}]
+    cfg["NVRAM"]["WriteFlash"] = False
+    pi = cfg["PlatformInfo"]
+    pi.update(UpdateSMBIOS=False, UpdateDataHub=False, UpdateNVRAM=False)
+    cfg["UEFI"]["Drivers"] = [{"Arguments": "", "Comment": d, "Enabled": True, "LoadEarly": False, "Path": d}
+                              for d in drivers]
+    for (sec, sub), tpl in templates.items():
+        cfg[sec][sub] = [conform_entry(e, tpl) for e in cfg[sec][sub]]
+    cfgp = os.path.join(ocd, "config.plist")
+    with open(cfgp, "wb") as fh:
+        plistlib.dump(cfg, fh, sort_keys=True)
+    with open(os.path.join(ocd, STARTER_MARK), "w") as fh:
+        fh.write("Generic HackPE starter OpenCore %s - boots HackPE and macOS recovery only.\n"
+                 "It cannot boot macOS: start HackPE and use 'Prepare this stick' to build the EFI for your PC.\n"
+                 % cache.manifest["OpenCorePkg"].get("tag"))
+    ok = ocvalidate(oc, cfgp) if validate else True
+    log("Starter EFI ready: %s" % efi)
+    return efi, ok
+
+
 def ocvalidate(oc_root, cfgp):
     exe = tool_exe(oc_root, "ocvalidate")
     if not os.path.isfile(exe):
@@ -1299,32 +1400,35 @@ def plan_opts(args):
     return o
 
 
-def default_ssdt_dir():
-    d = os.path.join(ROOT, "tools", "SSDTTime", "Results")
-    return d if os.path.isdir(d) and glob.glob(os.path.join(d, "*.aml")) else None
+def default_ssdt_dir(hw=None):
+    """Newest SSDTs generated for THIS PC (output\\<PC>\\ssdt\\<time>) - never another PC's."""
+    return tools.latest_run("ssdt", "*.aml", hw=hw)
 
 
-def default_usb_map():
-    for base in [os.path.join(ROOT, "usbmap")] + [os.path.join(d[0] + ":\\", "HackPE", "usbmap") for d in "CDEFGH"] if IS_WIN \
-            else [os.path.join(ROOT, "usbmap")]:
-        p = os.path.join(base, "UTBMap.kext")
-        if os.path.isdir(p):
-            return p
-    return None
+def default_usb_map(hw=None):
+    """USB map made on THIS PC (output\\<PC>\\usb\\UTBMap.kext). Maps of other PCs are never used."""
+    p = os.path.join(tools.output_root(), tools.machine(hw)["id"], "usb", "UTBMap.kext")
+    return p if os.path.isdir(p) else None
 
 
 def cmd_build(args, cache):
     if getattr(args, "disk", None) is None:
         stage("build", "Building OpenCore EFI")
     hw = get_hw(args)
+    if getattr(args, "hw", None):
+        save_hardware(hw)
     plan = build_plan(hw, args.target, plan_opts(args))
     log(plan_report(plan))
     if plan["blockers"] and not args.force:
         die("blockers found (see above). Use --force to build anyway.", 3)
-    out = args.out or os.path.join(tempfile.gettempdir(), "HackPE-EFI-" + args.target)
+    out = args.out or tools.keep_previous(tools.pc_dir("efi", sub=args.target, hw=hw))
     os.makedirs(out, exist_ok=True)
-    ssdt = args.ssdt_dir or default_ssdt_dir()
-    efi, ok, _ = build_efi(plan, out, cache, ssdt, args.usb_map or default_usb_map())
+    ssdt = args.ssdt_dir or default_ssdt_dir(hw)
+    usb = args.usb_map or default_usb_map(hw)
+    log("SSDTs : %s" % (ssdt or "prebuilt (none generated for this PC yet)"))
+    log("USB   : %s" % (usb or "no USB map for this PC yet (USBToolBox)"))
+    efi, ok, _ = build_efi(plan, out, cache, ssdt, usb)
+    log("EFI saved to %s" % out)
     if getattr(args, "disk", None) is None:
         stage("done", out)
     return efi, ok
@@ -1372,6 +1476,170 @@ def cmd_make_usb(args, cache):
     log("")
     log("USB installer ready on %s  ->  boot it on this PC and pick 'macOS Base System' in OpenCore." % root)
     stage("done", root)
+
+
+# ---------------------------------------------------------------------------
+# HackPE disk image stick (EFI | HACKPE | MACOS): finish it in place for this PC
+# ---------------------------------------------------------------------------
+IMAGE_LABELS = ("HACKPE", "MACOS")
+OFFLINE_FREE_GB = 18
+
+
+def find_image_stick():
+    """The disk HackPE booted from when it was flashed from HackPE-usb.img: {disk, macos, free_gb}."""
+    if not IS_WIN:
+        die("disk operations require Windows/WinPE")
+    out = ps("$h = Get-Volume -FileSystemLabel HACKPE -ErrorAction SilentlyContinue | Get-Partition | Select-Object -First 1; "
+             "if (-not $h) { '{}'; return }; $n = $h.DiskNumber; "
+             "$m = Get-Partition -DiskNumber $n | Where-Object { ($_ | Get-Volume -ErrorAction SilentlyContinue).FileSystemLabel -eq 'MACOS' } | Select-Object -First 1; "
+             "$d = Get-Disk -Number $n; "
+             "$used = (Get-Partition -DiskNumber $n | Measure-Object -Property Size -Sum).Sum; "
+             "[pscustomobject]@{ disk = $n; macos_part = $(if ($m) { $m.PartitionNumber } else { 0 }); "
+             "macos = $(if ($m -and $m.DriveLetter) { [string]$m.DriveLetter } else { '' }); "
+             "free_gb = [math]::Round(($d.Size - $used) / 1GB, 1) } | ConvertTo-Json")
+    d = json.loads(out or "{}")
+    if not d.get("disk") and d.get("disk") != 0:
+        die("this is not a HackPE image stick (no 'HACKPE' volume found). Flash HackPE-usb.img, or use make-usb with a second stick.")
+    if not d.get("macos_part"):
+        die("the HackPE stick has no 'MACOS' partition - re-flash HackPE-usb.img")
+    if not d.get("macos"):
+        l = free_letter("M")
+        ps("Set-Partition -DiskNumber %d -PartitionNumber %d -NewDriveLetter %s" % (d["disk"], d["macos_part"], l))
+        d["macos"] = l
+    return d
+
+
+def install_efi_into(efi, root):
+    """Replace EFI\\OC + EFI\\BOOT on a mounted ESP; keeps one backup of the previous OC folder."""
+    dst = os.path.join(root, "EFI")
+    os.makedirs(dst, exist_ok=True)
+    for old in glob.glob(os.path.join(dst, "*.bak-*")):
+        shutil.rmtree(old, ignore_errors=True)
+    for sub in ("OC", "BOOT"):
+        tgt = os.path.join(dst, sub)
+        if os.path.exists(tgt):
+            if sub == "OC":
+                os.rename(tgt, tgt + ".bak-" + time.strftime("%Y%m%d%H%M%S"))
+            else:
+                shutil.rmtree(tgt)
+        shutil.copytree(os.path.join(efi, sub), tgt)
+
+
+def cmd_prepare_stick(args, cache):
+    stage("check", "Checking the HackPE stick")
+    st = find_image_stick()
+    tgt = hwdb.macos(args.target)
+    macos_root = st["macos"] + ":\\"
+    log("HackPE stick: disk %d, MACOS partition %s, %.1f GB unpartitioned" % (st["disk"], macos_root, st["free_gb"]))
+    offline = getattr(args, "offline", False)
+    if offline:
+        if tgt["darwin"] < 20:
+            die("full offline installers exist for Big Sur and newer only")
+        have = [l for l in string.ascii_uppercase if os.path.isdir(l + ":\\") and _label(l) == "MACOS-INST"]
+        if not have and st["free_gb"] < OFFLINE_FREE_GB:
+            die("the offline installer needs %d GB of unpartitioned space on the stick (%.1f GB free) - "
+                "use a 32 GB+ stick" % (OFFLINE_FREE_GB, st["free_gb"]))
+    stage("build", "Building OpenCore EFI for this PC")
+    args.disk = st["disk"]
+    efi, ok = cmd_build(args, cache)
+    if not ok and not args.force:
+        die("ocvalidate reported problems (see above) - the stick was not changed. Use --force to continue.")
+    stage("copy", "Installing the EFI on the stick")
+    letter = mount_esp(st["disk"])
+    try:
+        install_efi_into(efi, letter + ":\\")
+        shutil.copy2(os.path.join(os.path.dirname(efi), "BUILD-NOTES.txt"), letter + ":\\")
+        log("OpenCore for this PC installed on the stick's EFI partition (generic one kept as EFI\\OC.bak-*).")
+    finally:
+        unmount_letter(letter)
+    if not args.no_recovery:
+        stage("recovery", "Downloading macOS from Apple")
+        rec = os.path.join(macos_root, "com.apple.recovery.boot")
+        shutil.rmtree(rec, ignore_errors=True)
+        download_recovery(cache, args.target, rec)
+    if offline:
+        stage("offline", "Downloading the full offline installer (12-18 GB)")
+        have = [l for l in string.ascii_uppercase if os.path.isdir(l + ":\\") and _label(l) == "MACOS-INST"]
+        if have:
+            inst = have[0]
+        else:
+            inst = free_letter("I")
+            diskpart("select disk %d\ncreate partition primary\nformat fs=exfat quick label=MACOS-INST\n"
+                     "assign letter=%s\nexit\n" % (st["disk"], inst))
+            time.sleep(2)
+        tools.offline_installer(cache, tgt["version"], tgt["darwin"], os.path.join(inst + ":\\", "macOS-" + args.target))
+        log("Offline install: in Recovery > Terminal run   sh /Volumes/MACOS-INST/install-offline.sh")
+    log("")
+    log("Stick ready: reboot, pick the USB stick, then 'macOS Base System' (%s) in OpenCore." % tgt["name"])
+    log("HackPE stays in the same menu for the post-install step.")
+    stage("done", macos_root)
+
+
+def _label(letter):
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(64)
+        ctypes.windll.kernel32.GetVolumeInformationW(letter + ":\\", buf, 64, None, None, None, None, 0)
+        return buf.value
+    except Exception:
+        return ""
+
+
+# Long jobs are logged to output\\<PC>\\logs\\<time>-<command>.log (in addition to the screen)
+LOGGED = {"make-usb", "prepare-stick", "build-efi", "install-esp", "ssdt-auto", "recovery", "offline-installer",
+          "fetch", "acpi-dump", "add-hackpe", "wizard"}
+
+
+class _Tee:
+    def __init__(self, stream, fh):
+        self.stream, self.fh = stream, fh
+
+    def write(self, data):
+        self.stream.write(data)
+        try:
+            self.fh.write(data)
+        except Exception:
+            pass
+        return len(data)
+
+    def flush(self):
+        self.stream.flush()
+        try:
+            self.fh.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def start_log(cmd):
+    try:
+        base = os.path.join(tools.pc_dir("logs"), "%s-%s" % (tools.stamp(), cmd))
+        path, n = base + ".log", 2
+        while os.path.exists(path):
+            path, n = "%s-%d.log" % (base, n), n + 1
+        fh = open(path, "w", encoding="utf-8", errors="replace")
+        fh.write("HackPE %s - %s\n%s\n\n" % (VERSION, " ".join(sys.argv[1:]), "=" * 60))
+        sys.stdout = _Tee(sys.stdout, fh)
+        sys.stderr = _Tee(sys.stderr, fh)
+        return path
+    except Exception as e:
+        print("warn: no log file (%s)" % e)
+        return None
+
+
+def output_paths(target=None):
+    m = tools.machine()
+    pc = os.path.join(tools.output_root(), m["id"])
+    out = {"root": tools.output_root(), "pc": pc, "machine": m, "volatile": tools.output_is_volatile()}
+    for k in tools.OUTPUT_KINDS:
+        out[k] = os.path.join(pc, k)
+    if target:
+        out["efi"] = os.path.join(pc, "efi", target)
+    out["ssdt_latest"] = default_ssdt_dir()
+    out["usb_map"] = default_usb_map()
+    return out
 
 
 def cmd_install_esp(args):
@@ -1463,9 +1731,8 @@ def wizard(cache):
     log(plan_report(plan))
     if plan["blockers"] and ask("Blockers found. Continue anyway? (y/n)", ["y", "n"], "n") != "y":
         return
-    out = os.path.join(tempfile.gettempdir(), "HackPE-EFI-" + target)
-    os.makedirs(out, exist_ok=True)
-    efi, ok, _ = build_efi(plan, out, cache, default_ssdt_dir(), default_usb_map())
+    out = tools.keep_previous(tools.pc_dir("efi", sub=target, hw=hw))
+    efi, ok, _ = build_efi(plan, out, cache, default_ssdt_dir(hw), default_usb_map(hw))
     if ask("Create a USB installer now? (y/n)", ["y", "n"], "y") != "y":
         log("EFI is in %s" % out)
         return
@@ -1545,6 +1812,15 @@ def main(argv=None):
     p = sp.add_parser("console"); g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--hide", action="store_true"); g.add_argument("--show", action="store_true")
     p = sp.add_parser("workarea"); p.add_argument("--bottom", type=int, default=0); p.add_argument("--top", type=int, default=0)
+    p = sp.add_parser("paths", help="where results are saved (output folder of this PC)")
+    p.add_argument("--target"); p.add_argument("--json", action="store_true"); p.add_argument("--hw", help="hw.json of another PC")
+    sp.add_parser("open-output", help="open this PC's output folder in Explorer++")
+    p = sp.add_parser("starter-efi"); p.add_argument("--out", required=True)
+    p = sp.add_parser("prepare-stick", help="finish a flashed HackPE-usb.img stick for this PC (EFI + macOS)")
+    plan_args(p)
+    p.add_argument("--offline", action="store_true", help="also the full installer on a new exFAT partition (32 GB+ stick)")
+    p.add_argument("--no-recovery", action="store_true"); p.add_argument("--force", action="store_true")
+    p.add_argument("--out"); p.add_argument("--ssdt-dir"); p.add_argument("--usb-map")
     p = sp.add_parser("windows"); p.add_argument("--json", action="store_true")
     p = sp.add_parser("focus"); p.add_argument("--hwnd", type=int, required=True)
     p = sp.add_parser("custom-tools"); p.add_argument("--json", action="store_true")
@@ -1557,26 +1833,22 @@ def main(argv=None):
 
     a = ap.parse_args(argv)
     cache = Cache(a.cache.split(";") if a.cache else None)
+    if getattr(a, "hw", None) and os.path.isfile(a.hw):
+        tools.machine(load_hw(a.hw))            # results go to the folder of the PC this hw.json describes
+    if a.cmd in LOGGED:
+        start_log(a.cmd)
 
     if a.cmd == "detect":
         hw, path = run_detect(a.out)
         if a.summary:
-            f = analyze(hw)
-            log("CPU      : %s -> %s" % (hw["Cpu"].get("Name"), hwdb.PLATFORMS[f["platform"]]["name"]))
-            log("System   : %s | %s | %s | firmware %s" % (f["vendor"], f["board"], "laptop" if f["laptop"] else "desktop", f["firmware"]))
-            for g in f["gpus"]:
-                log("GPU      : %s [%s] %s" % (g["name"], g["status"], g["notes"]))
-            for n in f["nics"]:
-                log("Ethernet : %s" % n["name"])
-            for w in f["wifi"]:
-                log("Wi-Fi    : %s" % w["name"])
-            for c in f["codecs"]:
-                log("Audio    : %s" % c)
+            for line in hw_summary(hw):
+                log(line)
             for d in hw.get("Disks", []):
                 log("Disk %-4s: %s (%s, %s GB)" % (d.get("Number"), d.get("Model"), d.get("BusType"), d.get("SizeGB")))
-            comp, mx = compat_matrix(f)
+            comp, mx = compat_matrix(analyze(hw))
             log("Newest native macOS: %s" % hwdb.DARWIN_NAME.get(mx, "none"))
         log("hardware json: %s" % path)
+        log("saved to     : %s" % tools.pc_dir("hardware", hw=hw))
     elif a.cmd == "plan":
         plan = build_plan(get_hw(a), a.target, plan_opts(a))
         if a.out:
@@ -1625,6 +1897,26 @@ def main(argv=None):
         tools.console_window(a.show)
     elif a.cmd == "workarea":
         tools.set_work_area(a.bottom, a.top)
+    elif a.cmd == "paths":
+        po = output_paths(a.target)
+        if a.json:
+            log(json.dumps(po))
+        else:
+            log("Output folder : %s%s" % (po["root"], "   (RAM - copy it before reboot!)" if po["volatile"] else ""))
+            log("This PC       : %s" % po["pc"])
+            for k in tools.OUTPUT_KINDS:
+                log("  %-16s %s" % (k, po[k]))
+            log("Newest SSDTs  : %s" % (po["ssdt_latest"] or "-"))
+            log("USB map       : %s" % (po["usb_map"] or "-"))
+    elif a.cmd == "open-output":
+        d = tools.pc_dir()
+        log("Output of this PC: %s" % d)
+        tools.launch_app(cache, "explorer", [d])
+    elif a.cmd == "starter-efi":
+        _, ok = build_starter_efi(cache, a.out)
+        sys.exit(0 if ok else 1)
+    elif a.cmd == "prepare-stick":
+        cmd_prepare_stick(a, cache)
     elif a.cmd == "windows":
         w = tools.list_windows()
         log(json.dumps([{"hwnd": h, "title": t} for h, t in w]) if a.json else "\n".join("%d  %s" % x for x in w))

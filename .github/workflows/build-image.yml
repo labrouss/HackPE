@@ -1,0 +1,194 @@
+name: Build HackPE USB image
+
+# Separate from the ISO build: runs after "Build HackPE ISO" finished (or by hand for any release) and
+# turns that ISO into a flash-ready USB image: EFI (starter OpenCore) | HACKPE (WinPE) | MACOS (empty).
+# macOS itself is never put in the image - HackPE downloads it from Apple on the user's PC.
+
+on:
+  workflow_run:
+    workflows: ["Build HackPE ISO"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Release tag whose ISO is used (empty = latest release)'
+        required: false
+        default: ''
+      attach:
+        description: 'Attach the image to that release'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write                  # attach the image to the release
+  actions: read                    # download the ISO artifact of the triggering run
+
+concurrency:
+  group: hackpe-image-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    name: Build USB image + boot test
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event != 'pull_request')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Tools (gdisk, dosfstools, mtools, 7-Zip, QEMU + OVMF)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gdisk dosfstools mtools p7zip-full xz-utils qemu-system-x86 ovmf
+          # disk space: the raw image + ISO + media need ~10 GB
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h / | tail -1
+
+      - name: Get the ISO (artifact of the ISO run)
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          pattern: HackPE-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/in
+
+      - name: Get the ISO (release)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ inputs.release }}
+        run: |
+          tag="$TAG"
+          [ -n "$tag" ] || tag=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+          echo "Using release $tag"
+          gh release download "$tag" --pattern '*.iso' --dir "$RUNNER_TEMP/in"
+
+      - name: Version
+        id: ver
+        run: |
+          iso=$(ls "$RUNNER_TEMP"/in/*.iso 2>/dev/null | head -1)
+          [ -f "$iso" ] || { echo "::error::no HackPE ISO found"; exit 1; }
+          v=$(basename "$iso" .iso); v=${v#HackPE-}
+          echo "iso=$iso" >> "$GITHUB_OUTPUT"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "HackPE $v  ($(du -h "$iso" | cut -f1))"
+
+      - name: Extract the WinPE media from the ISO
+        run: |
+          7z x -y -o"$RUNNER_TEMP/media" "${{ steps.ver.outputs.iso }}" > /dev/null
+          rm -f "${{ steps.ver.outputs.iso }}"
+          ls -la "$RUNNER_TEMP/media"
+
+      - name: Starter OpenCore (the OpenCore bundled in the ISO)
+        run: |
+          hp=$(find "$RUNNER_TEMP/media" -maxdepth 1 -iname hackpe -type d | head -1)
+          cp -r "$hp/cache" "$RUNNER_TEMP/cache"
+          py() { python3 engine/hackpe.py --cache "$RUNNER_TEMP/cache" "$@"; }
+          py starter-efi --out "$RUNNER_TEMP/starter" || {
+            echo "OpenCore not usable from the ISO cache - fetching"
+            py fetch --only OpenCorePkg,HfsPlus || true
+            py starter-efi --out "$RUNNER_TEMP/starter"
+          }
+
+      - name: Build the disk image
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          python3 build/make_disk_image.py --efi "$RUNNER_TEMP/starter" --media "$RUNNER_TEMP/media" \
+            --out "$RUNNER_TEMP/out/HackPE-usb-${{ steps.ver.outputs.version }}.img" --xz --keep-raw --tmp "$RUNNER_TEMP"
+          rm -rf "$RUNNER_TEMP/media"
+
+      - name: Boot test in QEMU (OpenCore picker -> HackPE desktop screenshots)
+        continue-on-error: true
+        run: |
+          # KVM on GitHub's Linux runners (documented udev rule)
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm || true
+          bash build/boot_test.sh "$RUNNER_TEMP/out/HackPE-usb-${{ steps.ver.outputs.version }}.img" "$RUNNER_TEMP/screens" 15 60 150 300
+
+      - name: Upload boot-test screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-test-${{ steps.ver.outputs.version }}
+          path: ${{ runner.temp }}/screens
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Size check (release files must be < 2 GiB)
+        id: files
+        run: |
+          cd "$RUNNER_TEMP/out"
+          rm -f ./*.img                                   # keep only the .img.xz
+          xz=$(ls ./*.img.xz); size=$(stat -c %s "$xz")
+          echo "Compressed image: $((size / 1048576)) MiB"
+          if [ "$size" -ge 2000000000 ]; then
+            split -b 1900M -d -a 1 "$xz" "$xz.part"
+            rm "$xz"
+            echo "split=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::image split into parts - join with: cat $xz.part* > $xz"
+          fi
+          ls -la
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HackPE-usb-${{ steps.ver.outputs.version }}
+          path: ${{ runner.temp }}/out/*
+          retention-days: 7
+          compression-level: 0
+
+      - name: Attach to the release
+        if: github.event_name == 'workflow_run' || inputs.attach
+        env:
+          V: ${{ steps.ver.outputs.version }}
+          SPLIT: ${{ steps.files.outputs.split }}
+          TAG: ${{ inputs.release }}
+        run: |
+          tag="${TAG:-$V}"
+          if ! gh release view "$tag" > /dev/null 2>&1; then
+            echo "No release '$tag' (the ISO run did not publish one) - image kept as a workflow artifact only."
+            exit 0
+          fi
+          gh release upload "$tag" "$RUNNER_TEMP"/out/* --clobber
+          gh release view "$tag" --json body --jq .body > notes.md
+          if ! grep -q '^## USB image' notes.md; then
+            img="HackPE-usb-$V.img.xz"
+            {
+              echo
+              echo "## USB image"
+              echo
+              echo "\`$img\` is a ready-to-flash stick: write it with **Rufus** (DD mode), **balenaEtcher** or \`xzcat $img | sudo dd of=/dev/sdX bs=4M\`."
+              if [ "$SPLIT" = "true" ]; then
+                echo "It is split into parts because of GitHub's 2 GiB file limit - join them first: \`cat $img.part* > $img\` (Windows: \`copy /b $img.part0+$img.part1 $img\`)."
+              fi
+              echo
+              echo "| Partition | Contents |"
+              echo "|---|---|"
+              echo "| EFI (300 MB) | Generic OpenCore: boots HackPE (and later macOS recovery) on any PC |"
+              echo "| HACKPE | The HackPE toolkit (same as the ISO) |"
+              echo "| MACOS | Empty - HackPE downloads macOS from Apple into it |"
+              echo
+              echo "Boot it, and in HackPE choose **This HackPE stick** in the Assistant (or Bar > USB > *Prepare this HackPE stick*): it builds OpenCore for your PC and downloads macOS recovery onto the same stick. On a 32 GB+ stick it can also add the full offline installer."
+            } >> notes.md
+            gh release edit "$tag" --notes-file notes.md
+          fi
+          echo "Attached to release $tag"
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## HackPE USB image ${{ steps.ver.outputs.version }}"
+            echo
+            echo '```'
+            ls -la "$RUNNER_TEMP/out" 2>/dev/null || echo "not built"
+            echo '```'
+            echo "Boot-test screenshots: artifact **boot-test-${{ steps.ver.outputs.version }}**"
+          } >> "$GITHUB_STEP_SUMMARY"

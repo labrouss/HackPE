@@ -28,15 +28,33 @@ echo.
 
 rem --- HackPE Bar: taskbar-style launcher docked at the bottom of the screen. It runs in this
 rem     console (hidden while the bar is up) - closing it brings back the classic text menu below.
+rem     (no "where.exe" check: WinPE does not ship it - test the file itself)
+set "PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%PS%" set "PS=powershell.exe"
+if exist X:\ (set "BARLOG=X:\HackPE-work\bar.log") else (set "BARLOG=%TEMP%\HackPE-work\bar.log")
 set "BARSTART=-StartAssistant"
 :bar
-where powershell.exe >nul 2>&1 || goto menu
-echo   Starting the HackPE Bar (and the Assistant)...
-powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "%HACKPE_ROOT%\gui\HackPE-Bar.ps1" %BARSTART%
-set "BARSTART="
+if not exist "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" (
+    echo   PowerShell is not part of this WinPE image - using the text menu.
+    goto menu
+)
+echo   Starting the HackPE Bar (and the Assistant)...  log: %BARLOG%
+"%PS%" -NoProfile -ExecutionPolicy Bypass -STA -File "%HACKPE_ROOT%\gui\HackPE-Bar.ps1" %BARSTART%
+set "BARRC=%errorlevel%"
 "%PY%" "%ENGINE%" console --show
 "%PY%" "%ENGINE%" workarea --bottom 0
 "%PY%" "%ENGINE%" maximize
+if not "%BARRC%"=="0" (
+    echo.
+    echo   *** The HackPE Bar stopped with exit code %BARRC%. Details:
+    if exist "%BARLOG%" type "%BARLOG%"
+    echo.
+    if defined BARSTART (
+        echo   Starting the HackPE Assistant instead...
+        start "HackPE Assistant" "%PS%" -NoProfile -ExecutionPolicy Bypass -STA -File "%HACKPE_ROOT%\gui\HackPE-Assistant.ps1"
+    )
+)
+set "BARSTART="
 
 :menu
 echo.
@@ -48,6 +66,7 @@ echo    2  Text-mode wizard (detect, build EFI, make USB)
 echo    T  Tools: ACPI dump, SSDT auto-generation, SSDTTime, USBToolBox,
 echo          OCAuxiliaryTools, drivers, Wi-Fi, run any program
 echo    X  File explorer (Explorer++)       N  Text editor (Notepad++)
+echo    O  Output folder of this PC (hardware, ACPI, SSDTs, USB map, EFIs, logs)
 echo    3  Hardware report
 echo    4  Update OpenCore / kexts (needs internet)
 echo    5  Command prompt
@@ -57,12 +76,13 @@ echo   ---------------------------------------------
 set "c="
 set /p "c=  Choice: "
 if /i "%c%"=="B" goto bar
-if "%c%"=="1" start "HackPE Assistant" powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "%HACKPE_ROOT%\gui\HackPE-Assistant.ps1"
-if /i "%c%"=="E" start "HackPE Expert" powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "%HACKPE_ROOT%\gui\HackPE-Expert.ps1"
+if "%c%"=="1" start "HackPE Assistant" "%PS%" -NoProfile -ExecutionPolicy Bypass -STA -File "%HACKPE_ROOT%\gui\HackPE-Assistant.ps1"
+if /i "%c%"=="E" start "HackPE Expert" "%PS%" -NoProfile -ExecutionPolicy Bypass -STA -File "%HACKPE_ROOT%\gui\HackPE-Expert.ps1"
 if "%c%"=="2" "%PY%" "%ENGINE%" wizard
 if /i "%c%"=="T" "%PY%" "%ENGINE%" tools
 if /i "%c%"=="X" "%PY%" "%ENGINE%" app explorer
 if /i "%c%"=="N" "%PY%" "%ENGINE%" app notepad
+if /i "%c%"=="O" "%PY%" "%ENGINE%" open-output
 if "%c%"=="3" "%PY%" "%ENGINE%" detect --summary
 if "%c%"=="4" "%PY%" "%ENGINE%" fetch
 if "%c%"=="5" start "HackPE shell" /max cmd.exe /k cd /d "%HACKPE_ROOT%"

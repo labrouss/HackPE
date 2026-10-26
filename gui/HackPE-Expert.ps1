@@ -78,7 +78,16 @@ function Get-PlanArgs {
     return $a
 }
 
-function Get-EfiOut { Join-Path $Work ("EFI-" + (Get-Target)) }
+# Results live in the engine's output folder: <stick>\HackPE\output\<PC>\efi\<target>
+$script:EfiDirs = @{}
+function Get-EfiOut {
+    $t = Get-Target
+    if (-not $script:EfiDirs[$t]) {
+        try { $script:EfiDirs[$t] = ((& $Py $Engine paths --target $t --json 2>$null | Out-String) | ConvertFrom-Json).efi } catch {}
+        if (-not $script:EfiDirs[$t]) { $script:EfiDirs[$t] = Join-Path $Work ("EFI-" + $t) }
+    }
+    $script:EfiDirs[$t]
+}
 
 function Confirm-Danger([string]$what, [string]$token) {
     $f = New-Object Windows.Forms.Form
@@ -198,14 +207,14 @@ $t2.Controls.AddRange(@($b, $Pout))
 $t3 = New-Object Windows.Forms.TabPage; $t3.Text = '3. Build EFI'
 $info3 = New-Object Windows.Forms.Label; $info3.Location = '12,52'; $info3.Size = '1000,120'
 $info3.Text = "Builds a complete OpenCore EFI (OpenCore, kexts, SSDTs, config.plist with generated SMBIOS) for this PC.`r`n" +
-              "Output: $Work\EFI-<target>\EFI   (BUILD-NOTES.txt explains BIOS settings and next steps)`r`n`r`n" +
+              "Output: <stick>\HackPE\output\<this PC>\efi\<target>\EFI   (BUILD-NOTES.txt explains BIOS settings and next steps)`r`n`r`n" +
               "Custom SSDTs: run Tools > SSDTTime first - its Results folder is picked up automatically.`r`n" +
               "USB map: run Tools > USBToolBox, export UTBMap.kext into $Root\usbmap - picked up automatically.`r`n" +
               "Builds with blockers (unsupported GPU/CPU) need 'Force'."
 $ForceBox = New-Object Windows.Forms.CheckBox; $ForceBox.Text = 'Force (ignore blockers)'; $ForceBox.Location = '12,180'; $ForceBox.AutoSize = $true
 $b = New-Btn 'Build EFI' 12 10
 $b.Add_Click({
-    $a = @('build-efi') + (Get-PlanArgs) + @('--out', (Get-EfiOut))
+    $a = @('build-efi') + (Get-PlanArgs)
     if ($ForceBox.Checked) { $a += '--force' }
     Start-EngineConsole $a 'Build EFI'
 })
@@ -248,7 +257,7 @@ $b2.Add_Click({
     $n = $UsbList.SelectedItems[0].Text; $m = $UsbList.SelectedItems[0].SubItems[1].Text
     if ($UsbList.SelectedItems[0].SubItems[4].Text) { Write-Log 'Refusing: that is the system disk or the HackPE stick - use a second USB stick'; return }
     if (-not (Confirm-Danger "ALL DATA on disk $n ($m) will be erased and replaced by a $($TargetBox.Text) installer." $n)) { Write-Log 'Cancelled'; return }
-    $a = @('make-usb') + (Get-PlanArgs) + @('--disk', $n, '--yes', '--out', (Get-EfiOut))
+    $a = @('make-usb') + (Get-PlanArgs) + @('--disk', $n, '--yes')
     if ($AnyBus.Checked) { $a += '--any-bus' }
     if ($NoRec.Checked) { $a += '--no-recovery' }
     if ($Offline4.Checked) { $a += '--offline' }
@@ -283,6 +292,7 @@ $b2.Add_Click({
 $t5.Controls.AddRange(@($b, $b2, $EspList))
 
 $tools = @(
+    @('Open output folder (this PC)', { $null = Invoke-Engine @('open-output'); Write-Log ((Invoke-Engine @('paths')) -split "`r?`n" | Select-Object -First 2) }),
     @('File explorer (Explorer++)', { $null = Invoke-Engine @('app', 'explorer') }),
     @('Text editor (Notepad++)', { $null = Invoke-Engine @('app', 'notepad') }),
     @('OCAuxiliaryTools (OCAT)', { $null = Invoke-Engine @('app', 'ocat'); Write-Log 'OCAT started (if nothing appears, run OCAT on full Windows)' }),

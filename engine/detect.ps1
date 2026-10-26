@@ -27,6 +27,7 @@ $r.Cpu = [ordered]@{
 $cs = Get-CimInstance Win32_ComputerSystem
 $bb = Get-CimInstance Win32_BaseBoard
 $bios = Get-CimInstance Win32_BIOS
+$csp = Get-CimInstance Win32_ComputerSystemProduct -ErrorAction SilentlyContinue   # UUID: tells identical models apart
 $enc = Get-CimInstance Win32_SystemEnclosure | Select-Object -First 1
 $bat = @(Get-CimInstance Win32_Battery)
 $fw = 'Unknown'
@@ -42,6 +43,7 @@ $r.System = [ordered]@{
     ChassisTypes = @($enc.ChassisTypes); HasBattery = ($bat.Count -gt 0)
     BoardManufacturer = $bb.Manufacturer; BoardProduct = $bb.Product
     BiosVendor = $bios.Manufacturer; BiosVersion = $bios.SMBIOSBIOSVersion
+    SystemUUID = $(if ($csp) { [string]$csp.UUID } else { '' })
     Firmware = $fw; SecureBoot = $sb; RamGB = [math]::Round($cs.TotalPhysicalMemory / 1GB, 1)
 }
 

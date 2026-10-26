@@ -75,6 +75,36 @@ A Windows build takes about 25–40 minutes, mostly ADK download and DISM.
 
 > **Licensing:** WinPE is covered by the Windows ADK license terms, and Microsoft limits WinPE to deployment and recovery use, so publishing the ISO publicly may not be allowed. The safe option is a **private** repository, so artifacts and releases are visible only to you. Note that private-repo Windows minutes count double, and artifact storage on the free plan is 500 MB. Release assets don't count toward that, so prefer tagged releases. Or keep the repo public without releases and let people build their own ISO.
 
+## USB image (flash and boot, no USB-making step)
+
+A second workflow, `.github/workflows/build-image.yml`, runs after every successful ISO build (or by hand: *Actions → Build HackPE USB image → Run workflow*, for any release). It turns the ISO into a ready-to-flash stick image, so you get both:
+
+| Download | Use it for |
+|---|---|
+| `HackPE-<version>.iso` | VMs, Ventoy, Rufus "ISO mode", burning |
+| `HackPE-usb-<version>.img.xz` | Flash with **Rufus** (DD mode), **balenaEtcher** or `xzcat … \| sudo dd of=/dev/sdX bs=4M` |
+
+The image is about 6 GB once written, so it fits any 8 GB+ stick:
+
+| # | Partition | Contents |
+|---|---|---|
+| 1 | **EFI**, FAT32, 300 MB | Generic "starter" OpenCore: no kexts or SSDTs, so it boots on any PC and only shows the picker |
+| 2 | **HACKPE**, FAT32 | The WinPE toolkit (the same as the ISO). The OpenCore picker shows it as **HackPE Toolkit** and starts it after 10 s |
+| 3 | **MACOS**, FAT32, 3 GB | Empty. HackPE downloads macOS recovery from Apple into it |
+
+**How users use it:**
+1. Flash the image to a stick.
+2. Boot it. OpenCore starts HackPE.
+3. In the Assistant, choose **This HackPE stick (recommended)**. You can also use Bar › USB › *Prepare this HackPE stick*, or run `hackpe.py prepare-stick --target tahoe`. Nothing on the stick is erased:
+   - OpenCore built for this PC replaces the starter on partition 1 (the starter is kept as `EFI\OC.bak-*`);
+   - macOS recovery is downloaded to MACOS;
+   - with *offline installer* on a 32 GB+ stick, the free space becomes an exFAT `MACOS-INST` partition holding the full installer.
+4. Reboot. The OpenCore picker now shows **macOS Base System** next to **HackPE Toolkit**: install macOS, then boot HackPE again for the post-install EFI step.
+
+**No macOS in the image:** the image never contains Apple software. Redistributing macOS isn't permitted, and the 2 GiB release-file limit wouldn't allow it anyway. The workflow also boots the image in QEMU (UEFI, as a USB stick) and saves screenshots of the OpenCore picker and the HackPE desktop as the `boot-test-<version>` artifact. If the compressed image ever passes 2 GiB, it's split into `.part0/.part1` files, and the release notes explain how to join them.
+
+The WinPE licensing note above applies to the image just as it does to the ISO.
+
 ## Use it: the HackPE Assistant
 
 Boot the target PC from the HackPE stick (UEFI mode, Secure Boot off). The **Assistant** starts and walks you through each step in plain language:
@@ -124,10 +154,10 @@ The classic text menu has option **`T  Tools`**. A single tool can also run by i
 
 | Key | Tool | CLI |
 |---|---|---|
-| 1 | **Dump ACPI tables** with 64-bit `acpidump.exe`, falling back to the Windows firmware-table API. A copy is kept in `\HackPE\acpi` on the stick. | `acpi-dump` |
+| 1 | **Dump ACPI tables** with 64-bit `acpidump.exe`, falling back to the Windows firmware-table API. Saved to `output\<PC>\acpi\<time>`. | `acpi-dump` |
 | 2 | **Auto-generate SSDTs**: dumps the tables, then drives SSDTTime with the right generators for the detected platform (EC, USBX, PLUG, RTCAWAC, PMC on 300-series, PNLF and XOSI on laptops). | `ssdt-auto` |
 | 3 | SSDTTime, interactive with all options | `ssdttime` |
-| 5 | **USBToolBox**, which produces `UTBMap.kext` (copied to `\HackPE\usbmap` on the stick) | `usbtoolbox` |
+| 5 | **USBToolBox**, which produces `UTBMap.kext` + `usb.json`, saved in `output\<PC>\usb` (discovery continues after a reboot) | `usbtoolbox` |
 | 6 | Rebuild the EFI. Generated SSDTs and the USB map are picked up automatically. Generated SSDTs replace the matching prebuilt ones; prebuilt ones fill any gaps (e.g. SSDT-CPUR on AMD). | `build-efi` |
 | 7 / 8 / 9 | ocvalidate · macserial · mount the EFI partition of any disk | `validate` |
 | X / E / O | **Explorer++** (file explorer) · **Notepad++** · **OCAuxiliaryTools** (config editor) | `app explorer\|notepad\|ocat` |
@@ -135,6 +165,30 @@ The classic text menu has option **`T  Tools`**. A single tool can also run by i
 | R / T1… | **Run any program** (`.exe .py .cmd .bat .ps1`) · your own tools from `\HackPE\tools` on the stick or `tools/custom` in the repo | `run` |
 
 `acpidump.exe` and `iasl.exe` are **64-bit builds** made from the official ACPICA source by `build/build-acpica-win64.sh` (MinGW-w64, done in CI). Intel only ships 32-bit Windows binaries, and x64 WinPE has no WOW64 layer to run them. When HackPE is built, any Windows DLLs the bundled apps need that WinPE lacks (DirectX, dwmapi, uxtheme…) are found by scanning the PE imports and copied from the build host.
+
+## Output folder: every result in one place
+
+Every tool saves its results in **one folder per PC**. It goes on the stick when HackPE finds a writable `\HackPE` folder (the USB image, or a stick made by HackPE), so results survive a reboot. Otherwise it goes to `X:\HackPE-work\output` in RAM, and HackPE reminds you to copy it.
+
+```
+\HackPE\output\
+  README.txt                what goes where
+  machines.txt              index: folder | PC | CPU | last used
+  ASUSTeK_PRIME-Z390-A_b1bcb5\          <- vendor/model (motherboard for DIY PCs) + ID from the system UUID
+    machine.json            vendor, model, board, CPU, first/last seen
+    hardware\               hw.json, report.txt, Hardware-Sniffer-<time>\
+    acpi\<time>\            ACPI table dumps
+    ssdt\<time>-auto\       SSDTs + patches_OC.plist (auto-generation or SSDTTime)
+    usb\                    UTBMap.kext, usb.json, USBToolBox\ (its working copy), history\<time>\
+    efi\tahoe\              EFI\, BUILD-NOTES.txt, plan.json   (+ tahoe.previous = the build before)
+    opcore-simplify\<time>\ EFIs made with OpCore-Simplify
+    logs\<time>-<command>.log   every USB creation, EFI build, download, SSDT run
+  downloads\                tools downloaded by Ferramentas TOPS
+```
+
+- **One stick for many PCs.** An EFI build uses the newest SSDTs and the USB map of the PC it runs on. Results from another PC are never mixed in.
+- **Open it:** Bar › HackPE (or Apps) › *Output folder of this PC*, Tools menu **V**, `hackpe.py open-output`, or `hackpe.py paths` to print the locations.
+- **Choose another place:** set `HACKPE_OUTPUT` to any folder before starting HackPE.
 
 ## Full offline installer (no internet during the install)
 
@@ -226,15 +280,16 @@ Launch.cmd                 WinPE auto-start: HackPE Bar, text menu fallback
 gui/HackPE-Bar.ps1         taskbar-style launcher docked at the bottom of the screen
 gui/HackPE-Assistant.ps1   guided step-by-step assistant (default)
 gui/HackPE-Expert.ps1      expert GUI (5 tabs, every option)
-engine/hackpe.py      engine: detect/plan/fetch/build-efi/recovery/make-usb/install-esp/wizard
+engine/hackpe.py      engine: detect/plan/fetch/build-efi/recovery/make-usb/prepare-stick/install-esp/starter-efi/wizard
 engine/hwdb.py        hardware knowledge base (CPU/GPU/NIC/Wi-Fi, SMBIOS rules, quirks, packages)
 engine/detect.ps1     driver-independent hardware probe
 engine/tools.py       Tools menu: ACPI dump, SSDT auto-gen, SSDTTime, USBToolBox, apps, drivers, Wi-Fi
-build/                build-acpica-win64.sh (64-bit iasl/acpidump for WinPE)
+build/                build-acpica-win64.sh (64-bit iasl/acpidump for WinPE), make_disk_image.py (USB image),
+                      boot_test.sh (QEMU/OVMF boot screenshots), release_notes.py
 tools/custom/         your own tools, baked into the ISO
 tests/                regression tests + hardware fixtures (run in CI)
 drivers/              optional extra WinPE drivers (injected by CI)
-.github/workflows/    GitHub Actions: test + ISO build + release
+.github/workflows/    build-iso.yml (test + ISO + release), build-image.yml (USB image -> same release)
 data/                 cacert.pem (downloaded at build)
 ```
 

@@ -8,7 +8,7 @@ HackPE regression tests (run in CI on Linux, or locally).
 2. plans every fixture against every macOS version and checks expectations
 3. builds real EFIs and validates each config.plist with OpenCore's ocvalidate
 """
-import argparse, json, os, plistlib, re, subprocess, sys, tempfile
+import argparse, glob, json, os, plistlib, re, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -45,6 +45,7 @@ def main():
     ap.add_argument("--iasl", help="native iasl binary for SSDTTime (Linux/macOS)")
     a = ap.parse_args()
     cache = hackpe.Cache([a.cache])
+    os.environ["HACKPE_OUTPUT"] = tempfile.mkdtemp(prefix="hackpe-output-")   # isolated output folder
 
     print("== fetch")
     if not a.offline:
@@ -107,7 +108,6 @@ def main():
                 check(cores and all(c == plan["cores"] for c in cores), "%s/%s AMD core count patched" % (fx, key))
 
     print("== HackPE as OpenCore boot entry")
-    import shutil
     import tools as _t2
     media = tempfile.mkdtemp(prefix="pe-media-")
     for rel, data in ((("sources", "boot.wim"), b"wim"), (("boot", "boot.sdi"), b"sdi"),
@@ -168,6 +168,111 @@ def main():
             check(r.returncode == 0 and "No issues found" in r.stdout, "%s: EFI with generated SSDTs passes ocvalidate" % fx)
             if r.returncode != 0:
                 print("        " + r.stdout.strip().replace("\n", "\n        "))
+
+    print("== USB disk image (starter OpenCore + layout)")
+    st_out = tempfile.mkdtemp(prefix="hackpe-starter-")
+    sefi, sok = hackpe.build_starter_efi(cache, st_out)
+    check(sok, "starter EFI passes ocvalidate")
+    scfg = plistlib.load(open(os.path.join(sefi, "OC", "config.plist"), "rb"))
+    check(scfg["Misc"]["Security"]["ScanPolicy"] == 0 and not scfg["Kernel"]["Add"] and not scfg["ACPI"]["Add"],
+          "starter EFI: ScanPolicy 0, no kexts/SSDTs (boots on any PC)")
+    check(not scfg["PlatformInfo"]["UpdateSMBIOS"], "starter EFI does not touch SMBIOS")
+    if all(shutil.which(t) for t in ("sgdisk", "mkfs.fat", "mcopy", "mdir")):
+        media = tempfile.mkdtemp(prefix="hackpe-media-")
+        for rel, data in ((("EFI", "Boot", "bootx64.efi"), b"MZ" + b"\0" * 4096), (("EFI", "Microsoft", "Boot", "BCD"), b"bcd"),
+                          (("boot", "boot.sdi"), b"sdi"), (("sources", "boot.wim"), os.urandom(1 << 20)),
+                          (("HackPE", "cache", "manifest.json"), b"{}")):
+            os.makedirs(os.path.join(media, *rel[:-1]), exist_ok=True)
+            open(os.path.join(media, *rel), "wb").write(data)
+        img = os.path.join(tempfile.mkdtemp(prefix="hackpe-img-"), "HackPE-usb.img")
+        r = subprocess.run([sys.executable, os.path.join(HERE, "..", "build", "make_disk_image.py"), "--efi", st_out,
+                            "--media", media, "--out", img, "--macos-mib", "64", "--hackpe-free-mib", "32"],
+                           capture_output=True, text=True)
+        check(r.returncode == 0 and os.path.isfile(img), "make_disk_image builds an image")
+        if r.returncode != 0:
+            print("        " + (r.stdout + r.stderr).strip().replace("\n", "\n        "))
+        else:
+            gpt = subprocess.run(["sgdisk", "-p", img], capture_output=True, text=True).stdout
+            parts = re.findall(r"^\s+(\d+)\s+(\d+)\s+\d+\s+\S+ \S+\s+(\w+)\s+(\S+)", gpt, re.M)
+            check([(p[2], p[3]) for p in parts] == [("EF00", "EFI"), ("0700", "HACKPE"), ("0700", "MACOS")],
+                  "GPT layout EFI(ESP) | HACKPE | MACOS (%s)" % parts)
+            env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
+
+            def ls(num, path):
+                off = int(dict((p[0], p[1]) for p in parts)[str(num)]) * 512
+                return subprocess.run(["mdir", "-b", "-i", "%s@@%d" % (img, off), path], capture_output=True, text=True, env=env).stdout
+            check("OpenCore.efi" in ls(1, "::/EFI/OC") and hackpe.STARTER_MARK in ls(1, "::/EFI/OC"), "P1 holds the starter OpenCore")
+            mb = ls(2, "::/EFI/Microsoft/Boot")
+            check("bootmgfw.efi" in mb and ".contentDetails" in mb, "P2: bootmgfw.efi + .contentDetails for the OpenCore picker")
+            check("boot.wim" in ls(2, "::/sources") and "HackPE" in ls(2, "::/"), "P2 holds WinPE + toolkit")
+            check("README.txt" in ls(3, "::/"), "P3 MACOS is empty except README")
+    else:
+        print("  (skipped image layout test: install gdisk dosfstools mtools)")
+
+    print("== tools run from writable copies (cache may be on a read-only CD)")
+    import stat
+    import tools as _tw
+    ro = tempfile.mkdtemp(prefix="hackpe-ro-")
+    exe = os.path.join(ro, "Windows.exe")
+    open(exe, "wb").write(b"MZ" + os.urandom(64))
+    os.chmod(ro, stat.S_IREAD | stat.S_IEXEC)
+    was = _tw.IS_WIN
+    try:
+        _tw.IS_WIN = True
+        cp = _tw.local_exe(exe, "USBToolBox")
+        check(cp != exe and os.path.isfile(cp) and os.access(os.path.dirname(cp), os.W_OK),
+              "local_exe copies a cached program to a writable folder (%s)" % cp)
+        check(_tw.local_exe(exe, "USBToolBox") == cp, "local_exe reuses the copy")
+    finally:
+        _tw.IS_WIN = was
+        os.chmod(ro, stat.S_IRWXU)
+    src = open(os.path.join(HERE, "..", "engine", "tools.py")).read()
+    for fn in ("run_hardware_sniffer", "acpica_tool"):
+        body = src.split("def %s(" % fn, 1)[1].split("\ndef ", 1)[0]
+        check("local_exe(" in body, "%s runs its program via local_exe" % fn)
+    body = src.split("def run_usbtoolbox(", 1)[1].split("\ndef ", 1)[0]
+    check('pc_dir("usb", sub="USBToolBox")' in body and "cwd=tooldir" in body,
+          "USBToolBox runs from a copy in output\\<PC>\\usb (usb.json persists, never on the CD)")
+    launch = open(os.path.join(HERE, "..", "Launch.cmd"), newline="").read()
+    check("where powershell" not in launch.lower(), "Launch.cmd does not depend on where.exe (missing in WinPE)")
+
+    print("== output folder (one folder per PC)")
+    import tools as _to
+    root = _to.output_root()
+    check(root == os.environ["HACKPE_OUTPUT"] and os.path.isfile(os.path.join(root, "README.txt")), "output root + README.txt")
+    ids = {}
+    for fx in fixtures:
+        hwx = hackpe.load_hw(os.path.join(HERE, "fixtures", fx + ".json"))
+        ids[fx] = _to.machine(hwx)["id"]
+    check(len(set(ids.values())) == len(ids), "every test PC gets its own folder %s" % sorted(ids.values()))
+    check(ids["cfl_rx580"].startswith("ASUSTeK_PRIME-Z390-A_"), "generic 'To Be Filled/System' -> motherboard name (%s)" % ids["cfl_rx580"])
+    check(ids["hsw_igpu"].startswith("Dell-Inc_OptiPlex-9020_"), "OEM PC -> vendor + model (%s)" % ids["hsw_igpu"])
+    env = dict(os.environ)
+    eng = [sys.executable, os.path.join(HERE, "..", "engine", "hackpe.py"), "--cache", a.cache]
+    fa, fb = (os.path.join(HERE, "fixtures", f + ".json") for f in ("cml_laptop", "adl_rtx"))
+    ha, hb = hackpe.load_hw(fa), hackpe.load_hw(fb)
+    pa, pb = (os.path.join(root, ids[f]) for f in ("cml_laptop", "adl_rtx"))
+    for _ in range(2):
+        subprocess.run(eng + ["build-efi", "--target", "tahoe", "--hw", fa], capture_output=True, env=env)
+    check(os.path.isfile(os.path.join(pa, "efi", "tahoe", "EFI", "OC", "config.plist")), "build-efi saves to output\\<PC>\\efi\\<target>")
+    check(os.path.isdir(os.path.join(pa, "efi", "tahoe.previous", "EFI")), "the previous build is kept as <target>.previous")
+    check(os.path.isfile(os.path.join(pa, "hardware", "hw.json")) and os.path.isfile(os.path.join(pa, "hardware", "report.txt")),
+          "hardware report saved (hw.json + report.txt)")
+    check(len(glob.glob(os.path.join(pa, "logs", "*-build-efi*.log"))) >= 2, "every build-efi run is logged")
+    check(os.path.isfile(os.path.join(pa, "machine.json")) and ids["cml_laptop"] in open(os.path.join(root, "machines.txt")).read(),
+          "machine.json + machines.txt index")
+    # SSDTs / USB map of PC A must never end up in PC B's EFI
+    fake = os.path.join(pa, "ssdt", "20990101-000000-auto")
+    os.makedirs(fake, exist_ok=True)
+    shutil.copy2(cache.path("ssdt:SSDT-EC-LAPTOP"), os.path.join(fake, "SSDT-EC.aml"))
+    os.makedirs(os.path.join(pa, "usb", "UTBMap.kext", "Contents"), exist_ok=True)
+    check(hackpe.default_ssdt_dir(ha) == fake, "newest SSDT run of the PC is used")
+    check(hackpe.default_ssdt_dir(hb) is None and hackpe.default_usb_map(hb) is None,
+          "another PC's SSDTs / USB map are never used")
+    check(hackpe.default_usb_map(ha) == os.path.join(pa, "usb", "UTBMap.kext"), "the PC's own UTBMap.kext is used")
+    shutil.rmtree(fake); shutil.rmtree(os.path.join(pa, "usb"))
+    po = json.loads(subprocess.run(eng + ["paths", "--json", "--target", "sonoma", "--hw", fb], capture_output=True, text=True, env=env).stdout)
+    check(po["efi"] == os.path.join(pb, "efi", "sonoma") and po["pc"] == pb, "paths --json reports the PC's folders")
 
     print("== HackPE Bar wiring")
     import inspect

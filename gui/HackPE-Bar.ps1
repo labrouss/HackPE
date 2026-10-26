@@ -9,10 +9,26 @@
 #>
 param([switch]$StartAssistant)
 
+# ---- diagnostics: every start is logged; any error while building the bar is reported with its line
+$LogDir  = if (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Control\MiniNT') { 'X:\HackPE-work' } else { Join-Path $env:TEMP 'HackPE-work' }
+$null = New-Item -ItemType Directory -Force -Path $LogDir -ErrorAction SilentlyContinue
+$LogFile = Join-Path $LogDir 'bar.log'
+function Write-BarLog([string]$m) {
+    try { Add-Content -Path $script:LogFile -Value ('[{0}] {1}' -f (Get-Date -Format 'HH:mm:ss'), $m) -Encoding ASCII } catch {}
+}
+try { Set-Content -Path $LogFile -Value ('[{0}] HackPE Bar starting - PowerShell {1}, {2}' -f (Get-Date -Format 'HH:mm:ss'), $PSVersionTable.PSVersion, [Environment]::OSVersion.VersionString) -Encoding ASCII } catch {}
+trap {
+    Write-BarLog ('ERROR: {0}' -f $_.Exception.Message)
+    if ($_.InvocationInfo) { Write-BarLog ('  at line {0}: {1}' -f $_.InvocationInfo.ScriptLineNumber, $_.InvocationInfo.Line.Trim()) }
+    try { $null = [Windows.Forms.MessageBox]::Show("The HackPE Bar could not start:`n`n$($_.Exception.Message)`n`nDetails: $script:LogFile`nThe text menu is shown instead.", 'HackPE') } catch {}
+    exit 1
+}
+$ErrorActionPreference = 'Stop'        # while building the bar: every problem is fatal and logged
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
-$ErrorActionPreference = 'Continue'
+Write-BarLog 'WinForms loaded'
 
 # ---------------------------------------------------------------- paths ----
 $Root   = Split-Path -Parent $PSScriptRoot
@@ -70,6 +86,12 @@ function Start-App([string]$Name, [string[]]$AppArgs) {
     $a = @($Engine, 'app', $Name) + @($AppArgs | Where-Object { $_ })
     Start-Process -FilePath $Py -ArgumentList ($a | ForEach-Object { Quote $_ }) -WindowStyle Hidden
     Set-Status "Started: $Name"
+}
+
+# This PC's results: <stick>\HackPE\output\<PC>\  (hardware, acpi, ssdt, usb, efi, logs)
+function Open-Output {
+    Start-Process -FilePath $Py -ArgumentList @((Quote $Engine), 'open-output') -WindowStyle Hidden
+    Set-Status 'Opening the output folder'
 }
 
 function Start-Shell([string]$Exe, [string[]]$ShellArgs) {
@@ -186,6 +208,7 @@ $Start = New-BarMenu '  HackPE  ' @(
     '-',
     'INFO',
     @('Hardware report', { Start-Tool 'h' 'Hardware report' }),
+    @('Output folder of this PC (all results)', { Open-Output }, 'Hardware report, ACPI dumps, SSDTs, USB map, EFIs and logs - one folder per PC on the stick'),
     @('Bundled versions', { Start-EngineConsole @('versions') 'Versions' }),
     @('Pre-flight check', { Start-EngineConsole @('preflight') 'Pre-flight' }),
     '-',
@@ -203,6 +226,7 @@ $null = New-BarMenu 'ACPI' @(
     @('Show generated SSDTs / ACPI patches', { Start-Tool '4' 'SSDT results' })
 )
 $null = New-BarMenu 'USB' @(
+    @('Prepare this HackPE stick for macOS (flashed image)', { Start-Tool 'u' 'Prepare stick' }, 'Builds OpenCore for this PC onto the stick and downloads macOS recovery - nothing is erased'),
     @('USBToolBox - map USB ports -> UTBMap.kext', { Start-Tool '5' 'USBToolBox' }),
     '-',
     @('Make a macOS USB installer (Assistant)', { Start-Gui 'HackPE-Assistant.ps1' }),
@@ -222,6 +246,7 @@ $null = New-BarMenu 'EFI' @(
     @('Open the EFI partition of a disk', { Start-Tool '9' 'Mount EFI' })
 )
 $null = New-BarMenu 'macOS' @(
+    @('Prepare this HackPE stick for macOS (flashed image)', { Start-Tool 'u' 'Prepare stick' }),
     @('Download full OFFLINE installer (gibMacOS, Big Sur+)', { Start-Tool 'm' 'Offline installer' }),
     @('gibMacOS - interactive (all versions / catalogs)', { Start-Tool 'g' 'gibMacOS' }),
     '-',
@@ -230,6 +255,7 @@ $null = New-BarMenu 'macOS' @(
 )
 $null = New-BarMenu 'Apps' @(
     @('File explorer  (Explorer++)', { Start-App 'explorer' }),
+    @('Output folder of this PC', { Open-Output }),
     @('Text editor  (Notepad++)', { Start-App 'notepad' }),
     @('OCAuxiliaryTools', { Start-App 'ocat' }),
     '-',
@@ -333,12 +359,16 @@ $Form.Add_KeyDown({
 })
 
 $Form.Add_Shown({
-    # Reserve the strip so maximized windows stop above the bar, then hide our console
-    $null = Invoke-Engine @('workarea', '--bottom', [string]$BarHeight)
-    $null = Invoke-Engine @('console', '--hide')
-    $Clock.Text = (Get-Date -Format 'HH:mm'); $Net.Text = Get-IpText
-    $Tick.Start()
-    if ($StartAssistant) { Start-Gui 'HackPE-Assistant.ps1' }
+    try {
+        Write-BarLog ('Bar shown at {0}' -f $Form.Bounds)
+        # Reserve the strip so maximized windows stop above the bar, then hide our console
+        $null = Invoke-Engine @('workarea', '--bottom', [string]$BarHeight)
+        $null = Invoke-Engine @('console', '--hide')
+        $Clock.Text = (Get-Date -Format 'HH:mm'); $Net.Text = Get-IpText
+        $Tick.Start()
+        if ($StartAssistant) { Start-Gui 'HackPE-Assistant.ps1' }
+        $Form.Activate()
+    } catch { Write-BarLog ('Shown handler: ' + $_.Exception.Message) }
 })
 $Form.Add_FormClosing({
     param($s, $e)
@@ -352,5 +382,9 @@ $Form.Add_FormClosing({
     $null = Invoke-Engine @('console', '--show')
 })
 
+Write-BarLog ('Python: {0}  Engine: {1}  Screen: {2}' -f $Py, $Engine, $Scr)
+if (-not $Py -or -not (Test-Path $Py)) { throw "python.exe not found ($Py)" }
+$ErrorActionPreference = 'Continue'    # running: a failing menu action must not close the bar
 [void]$Form.ShowDialog()
+Write-BarLog ('Bar closed (classic text menu: {0})' -f $script:ExitToText)
 exit 0

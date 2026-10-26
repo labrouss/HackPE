@@ -4,7 +4,7 @@ SSDTTime, USBToolBox, macserial, custom user tools and the text-mode Tools menu.
 
 Used by:  hackpe.py tools | acpi-dump | ssdt-auto | ssdttime | usbtoolbox | run
 """
-import datetime, glob, os, re, shutil, string, subprocess, sys, tempfile, zipfile
+import datetime, glob, hashlib, json, os, platform, re, shutil, string, subprocess, sys, tempfile, zipfile
 
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(ENGINE_DIR)
@@ -40,6 +40,216 @@ def media_dirs():
             except OSError:
                 pass
     return out
+
+
+# ===========================================================================
+# Output folder: every tool writes its results here, one sub-folder per PC
+#   <stick>\HackPE\output\<PC>\{hardware,acpi,ssdt,usb,efi,opcore-simplify,logs}
+# On the stick when one is writable (survives reboot), otherwise X:\HackPE-work\output (RAM).
+# ===========================================================================
+OUTPUT_KINDS = {
+    "hardware": "hardware detection (hw.json, report.txt) and Hardware-Sniffer reports",
+    "acpi": "ACPI table dumps (one folder per dump)",
+    "ssdt": "generated SSDTs + patches_OC.plist (one folder per run; build-efi uses the newest)",
+    "usb": "USBToolBox: UTBMap.kext + usb.json (build-efi uses UTBMap.kext), history\\ keeps older maps",
+    "efi": "OpenCore EFI per macOS version (EFI\\, BUILD-NOTES.txt, plan.json); the previous build is kept as <target>.previous",
+    "opcore-simplify": "EFIs made with OpCore-Simplify",
+    "logs": "a log of every long job (USB creation, EFI builds, downloads)",
+}
+_OUT = {}
+_GENERIC = re.compile(r"to be filled|system product name|system manufacturer|default string|not applicable|"
+                      r"o\.e\.m|^\s*(none|x|0|1234567890|invalid|system|default|unknown)\s*$", re.I)
+
+
+def output_root():
+    if "root" in _OUT:
+        return _OUT["root"]
+    d = os.environ.get("HACKPE_OUTPUT")
+    cands = [d] if d else [os.path.join(m, "output") for m in media_dirs()]
+    cands.append(os.path.join(work_dir(), "output"))
+    for c in cands:
+        try:
+            os.makedirs(c, exist_ok=True)
+            probe = os.path.join(c, ".w")
+            open(probe, "w").close()
+            os.remove(probe)
+            break
+        except OSError:
+            continue
+    _OUT["root"] = c
+    _write_readme(c)
+    return c
+
+
+def output_is_volatile():
+    """True when results only live in RAM (no writable stick) - they are lost at reboot."""
+    return IS_PE and os.path.normcase(output_root()).startswith(os.path.normcase(work_dir()))
+
+
+def _clean(x):
+    x = re.sub(r"[^\w.+-]+", "-", (x or "").strip()).strip("-.")
+    return x[:40]
+
+
+def _probe_machine():
+    if not IS_WIN:
+        return {"Manufacturer": "", "Model": platform.node(), "UUID": platform.node()}
+    try:
+        r = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+                            "$p = Get-CimInstance Win32_ComputerSystemProduct; $b = Get-CimInstance Win32_BaseBoard; "
+                            "$c = Get-CimInstance Win32_Processor | Select-Object -First 1; "
+                            "[pscustomobject]@{Manufacturer=$p.Vendor; Model=$p.Name; UUID=$p.UUID; "
+                            "BoardManufacturer=$b.Manufacturer; BoardProduct=$b.Product; Cpu=$c.Name} | ConvertTo-Json"],
+                           capture_output=True, text=True, timeout=60)
+        return json.loads(r.stdout or "{}")
+    except Exception:
+        return {}
+
+
+def machine(hw=None):
+    """Identity of this PC -> folder name like LENOVO_Legion-5_3fa9c1 (stable across boots)."""
+    if "machine" in _OUT and hw is None:
+        return _OUT["machine"]
+    info = {}
+    explicit = hw is not None                  # a --hw file may describe another PC: never mix in this PC's ids
+    if hw is None:
+        hwj = os.path.join(work_dir(), "hw.json")
+        if os.path.isfile(hwj):
+            try:
+                with open(hwj, encoding="utf-8-sig") as f:
+                    hw = json.load(f)
+            except Exception:
+                hw = None
+    if hw:
+        sy = hw.get("System") or {}
+        info = {"Manufacturer": sy.get("Manufacturer"), "Model": sy.get("Model"), "UUID": sy.get("SystemUUID"),
+                "BoardManufacturer": sy.get("BoardManufacturer"), "BoardProduct": sy.get("BoardProduct"),
+                "Cpu": (hw.get("Cpu") or {}).get("Name")}
+    if not info.get("UUID") and not explicit:
+        cache_f = os.path.join(work_dir(), "machine.json")
+        try:
+            with open(cache_f) as f:
+                probed = json.load(f)
+        except Exception:
+            probed = _probe_machine()
+            try:
+                with open(cache_f, "w") as f:
+                    json.dump(probed, f)
+            except OSError:
+                pass
+        info = {k: info.get(k) or probed.get(k) for k in set(info) | set(probed)}
+    vendor, model = info.get("Manufacturer") or "", info.get("Model") or ""
+    if not model or _GENERIC.search(model):              # generic DIY boards: use the motherboard name
+        vendor, model = info.get("BoardManufacturer") or vendor, info.get("BoardProduct") or model
+    if _GENERIC.search(vendor or ""):
+        vendor = ""
+    uid = (info.get("UUID") or "").upper()
+    if not uid or _GENERIC.search(uid) or set(uid) <= set("F0-"):
+        uid = "|".join(str(info.get(k) or "") for k in ("Manufacturer", "Model", "BoardProduct", "Cpu"))
+    short = hashlib.sha1(uid.encode()).hexdigest()[:6]
+    name = "_".join(x for x in (_clean(vendor), _clean(model)) if x) or "PC"
+    m = {"id": "%s_%s" % (name, short), "vendor": vendor, "model": model, "cpu": info.get("Cpu") or "",
+         "board": " ".join(x for x in (info.get("BoardManufacturer"), info.get("BoardProduct")) if x)}
+    if hw is None or "machine" not in _OUT:
+        _OUT["machine"] = m
+    return m
+
+
+def pc_dir(kind=None, sub=None, stamped=False, hw=None):
+    r"""Folder for this PC's results: output\<PC>\<kind>\[<sub>|<timestamp>]  (created)."""
+    m = machine(hw)
+    d = os.path.join(output_root(), m["id"])
+    if kind:
+        d = os.path.join(d, kind)
+    if sub:
+        d = os.path.join(d, sub)
+    elif stamped:
+        d = os.path.join(d, stamp())
+    os.makedirs(d, exist_ok=True)
+    _touch_machine(m)
+    return d
+
+
+def latest_run(kind, pattern="*", hw=None):
+    r"""Newest timestamped sub-folder of output\<PC>\<kind> containing pattern, or None."""
+    base = os.path.join(output_root(), machine(hw)["id"], kind)
+    runs = sorted((d for d in glob.glob(os.path.join(base, "2*")) if os.path.isdir(d) and glob.glob(os.path.join(d, pattern))),
+                  reverse=True)
+    return runs[0] if runs else None
+
+
+def _touch_machine(m):
+    if _OUT.get("touched") == m["id"]:
+        return
+    _OUT["touched"] = m["id"]
+    root = output_root()
+    d = os.path.join(root, m["id"])
+    try:
+        mf = os.path.join(d, "machine.json")
+        info = {}
+        if os.path.isfile(mf):
+            with open(mf) as f:
+                info = json.load(f)
+        info.update({k: v for k, v in m.items() if v}, last_used=datetime.datetime.now().isoformat(timespec="seconds"))
+        info.setdefault("first_seen", info["last_used"])
+        with open(mf, "w") as f:
+            json.dump(info, f, indent=1)
+        rows = []
+        for p in sorted(glob.glob(os.path.join(root, "*", "machine.json"))):
+            try:
+                with open(p) as f:
+                    j = json.load(f)
+                rows.append("%-40s %-28s %-42s %s" % (os.path.basename(os.path.dirname(p)), (j.get("vendor", "") + " " + j.get("model", "")).strip()[:28],
+                                                      j.get("cpu", "")[:42], j.get("last_used", "")))
+            except Exception:
+                pass
+        with open(os.path.join(root, "machines.txt"), "w") as f:
+            f.write("PCs with HackPE results on this stick (newest result per folder is used automatically)\n\n")
+            f.write("%-40s %-28s %-42s %s\n" % ("FOLDER", "PC", "CPU", "LAST USED"))
+            f.write("\n".join(rows) + "\n")
+    except OSError:
+        pass
+
+
+def _write_readme(root):
+    p = os.path.join(root, "README.txt")
+    if os.path.isfile(p):
+        return
+    lines = ["HackPE output folder", "=" * 20, "",
+             "Every HackPE tool saves its results here, in one folder per PC (see machines.txt):", "",
+             "  <PC>\\machine.json        which PC this is (vendor, model, CPU)"]
+    for k, v in OUTPUT_KINDS.items():
+        lines.append("  <PC>\\%-18s %s" % (k + "\\", v))
+    lines += ["  downloads\\              tools downloaded by Ferramentas TOPS and similar", "",
+              "HackPE picks the newest SSDTs and USB map of the PC it is running on when it builds an EFI.",
+              "Delete any folder you no longer need - nothing else depends on it."]
+    try:
+        with open(p, "w") as f:
+            f.write("\r\n".join(lines) + "\r\n")
+    except OSError:
+        pass
+
+
+def keep_previous(path):
+    """Before rebuilding <path>, keep the last build as <path>.previous (older ones are removed)."""
+    if os.path.isdir(path) and os.listdir(path):
+        prev = path + ".previous"
+        shutil.rmtree(prev, ignore_errors=True)
+        try:
+            os.rename(path, prev)
+        except OSError:
+            shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def copy_results(src, kind, hw=None, label=None):
+    r"""Snapshot a tool's result folder into output\<PC>\<kind>\<timestamp>; returns it."""
+    dst = pc_dir(kind, sub=(stamp() + ("-" + label if label else "")), hw=hw)
+    for n in os.listdir(src):
+        a = os.path.join(src, n)
+        (shutil.copytree if os.path.isdir(a) else shutil.copy2)(a, os.path.join(dst, n))
+    return dst
 
 
 # ===========================================================================
@@ -288,6 +498,23 @@ def backfill_dlls(image, scan_dirs, host_sys32=r"C:\Windows\System32"):
     return copied, sorted(missing)
 
 
+def local_exe(path, pkg=None):
+    """Run cached programs from a writable copy: the cache may sit on a read-only CD/ISO, and many tools
+    (PyInstaller builds like USBToolBox) write their files next to the .exe, not into the working folder."""
+    if not path or not IS_WIN:
+        return path
+    d = os.path.join(work_dir(), "bin", pkg or os.path.splitext(os.path.basename(path))[0])
+    dst = os.path.join(d, os.path.basename(path))
+    try:
+        if not (os.path.isfile(dst) and os.path.getsize(dst) == os.path.getsize(path)):
+            os.makedirs(d, exist_ok=True)
+            shutil.copy2(path, dst)
+        return dst
+    except OSError as e:
+        log("warn: could not copy %s to %s (%s) - running it in place" % (path, d, e))
+        return path
+
+
 def acpica_tool(cache, name):
     """Best runnable iasl/acpidump: 64-bit build first; 32-bit only outside WinPE."""
     for pkg in ("ACPICA64_" + name, "ACPICA_" + name):
@@ -297,7 +524,7 @@ def acpica_tool(cache, name):
         if IS_PE and pe_machine(p) == "x86":
             log("note: %s is 32-bit and cannot run in WinPE (no WOW64)" % os.path.basename(p))
             continue
-        return p
+        return local_exe(p, pkg)
     return None
 
 
@@ -378,7 +605,7 @@ def acpi_dump(cache, out=None):
     """Dump all ACPI tables of this PC. Returns folder."""
     if not IS_WIN:
         raise RuntimeError("ACPI dump needs Windows/WinPE (on Linux use /sys/firmware/acpi/tables)")
-    out = out or os.path.join(work_dir(), "ACPI-" + stamp())
+    out = out or pc_dir("acpi", stamped=True)
     os.makedirs(out, exist_ok=True)
     exe = acpidump_exe(cache)
     if exe:
@@ -396,14 +623,7 @@ def acpi_dump(cache, out=None):
     if not any(t.upper().startswith("DSDT") for t in tables):
         raise RuntimeError("no DSDT could be dumped")
     log("Dumped %d tables: %s" % (len(tables), " ".join(t[:-4] for t in tables)))
-    for m in media_dirs():                      # keep a copy on the stick for later / sharing
-        dst = os.path.join(m, "acpi", os.path.basename(out))
-        try:
-            shutil.copytree(out, dst)
-            log("Copy saved to %s" % dst)
-        except Exception:
-            pass
-        break
+    log("Saved to %s" % out)
     return out
 
 
@@ -505,12 +725,10 @@ def ssdt_auto(cache, plan, tables=None, log_fn=log):
         log_fn("ACPI patches: patches_OC.plist (merged automatically by build-efi)")
     if failed:
         log_fn("Not generated: %s" % ", ".join(failed))
-    for m in media_dirs():
-        try:
-            shutil.copytree(results, os.path.join(m, "ssdt", "Results-" + stamp()))
-        except Exception:
-            pass
-        break
+    if amls:
+        saved = copy_results(results, "ssdt", label="auto")
+        log_fn("Saved to %s  (build-efi uses the newest SSDTs of this PC)" % saved)
+        return saved, amls
     return results, amls
 
 
@@ -537,7 +755,13 @@ def run_ssdttime(cache):
     if not os.path.isfile(cfg):                     # keep our maximized console size
         with open(cfg, "w") as f:
             f.write('{"resize_window": false}')
-    return run_maximized([sys.executable, "SSDTTime.py"], cwd=st)
+    res = os.path.join(st, "Results")
+    before = {f: os.path.getmtime(f) for f in glob.glob(os.path.join(res, "*"))}
+    rc = run_maximized([sys.executable, "SSDTTime.py"], cwd=st)
+    after = {f: os.path.getmtime(f) for f in glob.glob(os.path.join(res, "*"))}
+    if glob.glob(os.path.join(res, "*.aml")) and after != before:
+        log("SSDTTime results saved to %s" % copy_results(res, "ssdt", label="ssdttime"))
+    return rc
 
 
 # ===========================================================================
@@ -654,11 +878,18 @@ def run_tops(cache):
     if not pick:
         raise RuntimeError("no runnable file found in the Ferramentas TOPS release (%s)" % ", ".join(os.listdir(dst)))
     log("Ferramentas TOPS: %s" % pick)
-    log("Downloaded tools go to %s - copy what you need to your stick with Explorer++." % os.path.join(work_dir(), "home", "Desktop"))
+    desk = os.path.join(work_dir(), "home", "Desktop")
+    log("Tools it downloads are copied to %s when it closes." % os.path.join(output_root(), "downloads"))
     if pick.lower().endswith(".sh"):
-        return run_bash(pick, cwd=os.path.dirname(pick))
-    bash, env = bash_env()                       # give .exe/.ps1/.bat variants git/curl/jq too
-    return run_maximized(run_cmd_for(pick), cwd=os.path.dirname(pick), env=env)
+        rc = run_bash(pick, cwd=os.path.dirname(pick))
+    else:
+        bash, env = bash_env()                   # give .exe/.ps1/.bat variants git/curl/jq too
+        rc = run_maximized(run_cmd_for(pick), cwd=os.path.dirname(pick), env=env)
+    if os.path.isdir(desk) and os.listdir(desk):
+        dst = os.path.join(output_root(), "downloads", "TOPS-" + stamp())
+        shutil.copytree(desk, dst)
+        log("Downloads saved to %s" % dst)
+    return rc
 
 
 def run_cmd_for(path):
@@ -677,21 +908,14 @@ def run_cmd_for(path):
 # ===========================================================================
 def run_hardware_sniffer(cache, out=None):
     """Hardware report + ACPI tables (the input OpCore-Simplify needs)."""
-    exe = cache.path("HardwareSniffer")
+    exe = local_exe(cache.path("HardwareSniffer"), "HardwareSniffer")
     if not exe:
         raise RuntimeError("Hardware-Sniffer is not in the download cache - run 'Update downloads'")
-    out = out or os.path.join(work_dir(), "SysReport-" + stamp())
+    out = out or pc_dir("hardware", sub="Hardware-Sniffer-" + stamp())
     os.makedirs(out, exist_ok=True)
     log("Hardware-Sniffer: exporting report + ACPI tables to %s" % out)
-    rc = run_maximized([exe, "-e", "-o", out], cwd=os.path.dirname(exe))
-    for m in media_dirs():
-        try:
-            dst = os.path.join(m, "reports", os.path.basename(out))
-            shutil.copytree(out, dst)
-            log("Copy saved to %s (use it with OpCore-Simplify on any PC)" % dst)
-        except Exception:
-            pass
-        break
+    rc = run_maximized([exe, "-e", "-o", out], cwd=out)
+    log("Saved to %s (use it with OpCore-Simplify on any PC)" % out)
     return rc, out
 
 
@@ -711,8 +935,12 @@ def prepare_opcore_simplify(cache):
 def run_opcore_simplify(cache):
     d = prepare_opcore_simplify(cache)
     log("OpCore-Simplify needs internet (it downloads the latest kexts from GitHub).")
-    log("Its EFI is written to %s\\Results - copy it to your stick with Explorer++ (X)." % d)
-    return run_maximized([sys.executable, "OpCore-Simplify.py"], cwd=d)
+    log("Its EFI is copied to %s when it closes." % pc_dir("opcore-simplify"))
+    rc = run_maximized([sys.executable, "OpCore-Simplify.py"], cwd=d)
+    res = os.path.join(d, "Results")
+    if os.path.isdir(res) and os.listdir(res):
+        log("OpCore-Simplify results saved to %s" % copy_results(res, "opcore-simplify"))
+    return rc
 
 
 def run_gibmacos(cache):
@@ -791,7 +1019,7 @@ def add_hackpe(target_root, media=None, log_fn=log):
         dst = os.path.join(target_root, rel)
         if os.path.isdir(src):
             if os.path.basename(src).lower() == "hackpe":
-                ignore = shutil.ignore_patterns("reports", "acpi", "ssdt", "Results*")
+                ignore = shutil.ignore_patterns("reports", "acpi", "ssdt", "Results*", "output", "usbmap")
             else:
                 ignore = None
             shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
@@ -826,39 +1054,38 @@ def remove_hackpe_tool_entry(oc_dir):
 # ===========================================================================
 # USBToolBox
 # ===========================================================================
-def usbmap_dir():
-    d = os.path.join(ROOT, "usbmap")
-    os.makedirs(d, exist_ok=True)
-    return d
-
-
 def run_usbtoolbox(cache):
-    exe = cache.path("USBToolBoxTool")
-    if not exe:
+    """USBToolBox runs from output\\<PC>\\usb\\USBToolBox: its usb.json (discovered ports) and the kext stay
+    with this PC on the stick, so port discovery can continue after a reboot."""
+    src = cache.path("USBToolBoxTool")
+    if not src:
         raise RuntimeError("USBToolBox is not in the download cache - run 'Update downloads'")
-    d = usbmap_dir()
+    usb = pc_dir("usb")
+    tooldir = pc_dir("usb", sub="USBToolBox")
+    exe = os.path.join(tooldir, os.path.basename(src))
+    if not (os.path.isfile(exe) and os.path.getsize(exe) == os.path.getsize(src)):
+        shutil.copy2(src, exe)
     log("USBToolBox: D = discover ports (plug a USB2 + USB3 device into every port),")
     log("            S = select ports (<= 15 per controller), K = build UTBMap.kext.")
-    log("Output folder: %s" % d)
-    run_maximized([exe], cwd=d)
-    found = glob.glob(os.path.join(d, "**", "UTBMap.kext"), recursive=True)
-    if found:
-        src = found[0]
-        if os.path.dirname(src) != d:
-            shutil.rmtree(os.path.join(d, "UTBMap.kext"), ignore_errors=True)
-            shutil.copytree(src, os.path.join(d, "UTBMap.kext"))
-        log("UTBMap.kext ready - it is included automatically in the next EFI build.")
-        for m in media_dirs():
-            try:
-                tgt = os.path.join(m, "usbmap", "UTBMap.kext")
-                shutil.rmtree(tgt, ignore_errors=True)
-                shutil.copytree(src, tgt)
-                log("Saved to %s (survives reboot)" % tgt)
-            except Exception:
-                pass
-            break
-    else:
-        log("No UTBMap.kext was built this time.")
+    log("Saved in %s" % usb)
+    before = {k: os.path.getmtime(k) for k in glob.glob(os.path.join(tooldir, "**", "UTBMap.kext", "Contents", "Info.plist"), recursive=True)}
+    run_maximized([exe], cwd=tooldir)
+    if os.path.isfile(os.path.join(tooldir, "usb.json")):
+        shutil.copy2(os.path.join(tooldir, "usb.json"), os.path.join(usb, "usb.json"))
+    found = sorted(glob.glob(os.path.join(tooldir, "**", "UTBMap.kext"), recursive=True),
+                   key=lambda k: os.path.getmtime(os.path.join(k, "Contents", "Info.plist")) if os.path.isfile(os.path.join(k, "Contents", "Info.plist")) else 0)
+    new = [k for k in found if before.get(os.path.join(k, "Contents", "Info.plist")) != os.path.getmtime(os.path.join(k, "Contents", "Info.plist"))] \
+        if found else []
+    if not new:
+        log("No new UTBMap.kext was built this time." + (" The previous map is kept." if os.path.isdir(os.path.join(usb, "UTBMap.kext")) else ""))
+        return
+    cur = os.path.join(usb, "UTBMap.kext")
+    if os.path.isdir(cur):                                   # keep the old map
+        hist = pc_dir("usb", sub=os.path.join("history", stamp()))
+        shutil.copytree(cur, os.path.join(hist, "UTBMap.kext"))
+        shutil.rmtree(cur, ignore_errors=True)
+    shutil.copytree(new[-1], cur)
+    log("UTBMap.kext saved to %s - it is included automatically in the next EFI build for this PC." % cur)
 
 
 # ===========================================================================
@@ -1058,8 +1285,13 @@ def tool_action(c, cache, engine, hwj=None, customs=None):
     elif c == "3":
         run_ssdttime(cache)
     elif c == "4":
-        r = os.path.join(ssdttime_dir(), "Results")
-        if os.path.isdir(r):
+        r = latest_run("ssdt", "*.aml")
+        runs = sorted(glob.glob(os.path.join(pc_dir("ssdt"), "2*")))
+        if r:
+            print("SSDT runs of this PC (newest is used by build-efi):")
+            for x in runs:
+                print("  %s%s" % (os.path.basename(x), "   <- newest" if x == r else ""))
+            print("\n%s:" % r)
             for f in sorted(os.listdir(r)):
                 print("  %s" % f)
             p = os.path.join(r, "patches_OC.plist")
@@ -1092,22 +1324,42 @@ def tool_action(c, cache, engine, hwj=None, customs=None):
         return False
     elif c == "k":
         run_hardware_sniffer(cache)
+    elif c == "v":
+        d = pc_dir()
+        print("Output folder of this PC: %s" % d)
+        if output_is_volatile():
+            print("NOTE: no writable stick found - this is in RAM and is lost at reboot. Copy it with Explorer++.")
+        launch_app(cache, "explorer", [d])
+        return False
+    elif c == "u":
+        keys = [m[0] for m in engine.hwdb.MACOS]
+        print("Finishes a stick flashed from HackPE-usb.img: OpenCore for THIS PC + macOS recovery (nothing is erased).")
+        print("Targets: " + ", ".join(keys))
+        t = input("Target macOS [tahoe]: ").strip().lower() or "tahoe"
+        if t not in keys:
+            raise RuntimeError("unknown target %s" % t)
+        args = ["prepare-stick", "--target", t]
+        if input("Also the full offline installer on a new exFAT partition (32 GB+ stick)? (y/N) ").lower() == "y":
+            args.append("--offline")
+        hwj_ = os.path.join(work_dir(), "hw.json")
+        if os.path.isfile(hwj_):
+            args += ["--hw", hwj_]
+        subprocess.call([sys.executable, os.path.join(ENGINE_DIR, "hackpe.py")] + args)
     elif c == "6":
         keys = [m[0] for m in engine.hwdb.MACOS]
         print("Targets: " + ", ".join(keys))
         t = input("Target macOS [tahoe]: ").strip().lower() or "tahoe"
         if t not in keys:
             raise RuntimeError("unknown target %s" % t)
-        out = os.path.join(work_dir(), "EFI-" + t)
-        args = ["build-efi", "--target", t, "--out", out]
+        args = ["build-efi", "--target", t]
         if os.path.isfile(hwj):
             args += ["--hw", hwj]
         subprocess.call([sys.executable, os.path.join(ENGINE_DIR, "hackpe.py")] + args)
-        print("\nEFI: %s\\EFI   (Expert mode > Install EFI to disk, or copy it to your stick)" % out)
+        print("\nEFI: %s\\EFI   (Expert mode > Install EFI to disk, or copy it to your stick)" % pc_dir("efi", sub=t))
     elif c == "7":
         p = input("Path to config.plist [latest build]: ").strip().strip('"')
         if not p:
-            cands = sorted(glob.glob(os.path.join(work_dir(), "EFI-*", "EFI", "OC", "config.plist")), key=os.path.getmtime)
+            cands = sorted(glob.glob(os.path.join(pc_dir("efi"), "*", "EFI", "OC", "config.plist")), key=os.path.getmtime)
             p = cands[-1] if cands else ""
         engine.ocvalidate(cache.extracted("OpenCorePkg"), p)
     elif c == "8":
@@ -1184,7 +1436,17 @@ def run_tool(key, cache, engine):
         print("\ninterrupted")
     except Exception as e:
         print("\nERROR: %s" % e)
+    _volatile_note()
     _pause("Press Enter to close this window...")
+
+
+def _volatile_note():
+    try:
+        if output_is_volatile():
+            print("\nNOTE: results are in %s (RAM) - no writable HackPE stick was found." % output_root())
+            print("      Copy that folder to a USB stick before rebooting (Bar > Apps > File explorer).")
+    except Exception:
+        pass
 
 
 def tools_menu(cache, engine):
@@ -1206,6 +1468,8 @@ def tools_menu(cache, engine):
         print("    4  Show generated SSDTs / ACPI patches")
         print("   USB / macOS")
         print("    5  USBToolBox - map USB ports -> UTBMap.kext")
+        print("    U  Prepare THIS HackPE stick for macOS (flashed image: EFI + recovery)")
+        print("    V  Open the output folder of this PC (all results: hardware, ACPI, SSDTs, USB map, EFIs, logs)")
         print("    M  Download full OFFLINE macOS installer (gibMacOS, Big Sur+)")
         print("    G  gibMacOS - interactive (all versions / catalogs)")
         print("   EFI")
