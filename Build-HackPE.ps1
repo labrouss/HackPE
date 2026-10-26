@@ -80,31 +80,60 @@ if (Test-Path (Join-Path $Src 'tools\custom')) {           # your own tools -> T
 "HackPE $Version  built $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC$(if ($env:GITHUB_SHA) { '  commit ' + $env:GITHUB_SHA.Substring(0, 7) })" |
     Set-Content -Encoding ASCII (Join-Path $Stage 'VERSION.txt')
 
+# Embeddable Python. Its ._pth file is KEPT: it isolates Python from the registry and PYTHONPATH of the
+# machine it runs on - without it, a Python installed on the build runner (or on a user's PC running the
+# portable toolkit) can leak its own .pyd modules in ("_ssl: incompatible internal ABI"). Scripts still
+# import their own folder through a one-line site hook (SSDTTime: "from Scripts import ...").
+$pyDir = Join-Path $Stage 'python'
+$py = Join-Path $pyDir 'python.exe'
+$ScriptDirHook = 'import sys, os; p = (os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv and sys.argv[0] not in ("", "-c", "-m") else os.getcwd()); sys.path.insert(0, p) if p not in sys.path else None'
+
+function Install-EmbeddedPython([string]$Ver) {
+    $zip = Join-Path $Dl "python-$Ver-embed-amd64.zip"
+    if (-not (Test-Path $zip)) {
+        Invoke-WebRequest -UseBasicParsing "https://www.python.org/ftp/python/$Ver/python-$Ver-embed-amd64.zip" -OutFile $zip
+    }
+    Remove-Item $pyDir -Recurse -Force -ErrorAction SilentlyContinue
+    Expand-Archive $zip $pyDir -Force
+    $pth = Get-ChildItem $pyDir -Filter 'python*._pth' | Select-Object -First 1
+    $stdlib = Get-ChildItem $pyDir -Filter 'python*.zip' | Select-Object -First 1
+    if (-not $pth -or -not $stdlib) { Write-Warning "python $Ver embeddable has no ._pth/stdlib zip"; return $false }
+    Set-Content -Encoding ASCII -Path $pth.FullName -Value @($stdlib.Name, '.', 'Lib\site-packages', 'import site')
+    $sp = Join-Path $pyDir 'Lib\site-packages'
+    New-Item -ItemType Directory -Force -Path $sp | Out-Null
+    Set-Content -Encoding ASCII -Path (Join-Path $sp 'hackpe_scriptdir.pth') -Value $ScriptDirHook
+    # smoke test: stdlib + SSL + the script-folder import, the way the tools use Python
+    $t = Join-Path $WorkDir 'pyprobe'
+    New-Item -ItemType Directory -Force -Path $t | Out-Null
+    Set-Content -Encoding ASCII -Path (Join-Path $t 'hackpe_probe_mod.py') -Value 'OK = True'
+    Set-Content -Encoding ASCII -Path (Join-Path $t 'probe.py') -Value @(
+        'import ssl, zipfile, plistlib, json, urllib.request, ctypes, xml.parsers.expat, hackpe_probe_mod',
+        'print("python ok", ssl.OPENSSL_VERSION)')
+    & $py (Join-Path $t 'probe.py') | Out-Host
+    return ($LASTEXITCODE -eq 0)
+}
+
 if ($PythonVersion -eq 'latest') {
     Step 'Resolving the latest stable Python with a Windows embeddable build'
     $idx = (Invoke-WebRequest -UseBasicParsing 'https://www.python.org/ftp/python/').Content
     $cands = [regex]::Matches($idx, 'href="(3\.\d+\.\d+)/"') | ForEach-Object { [version]$_.Groups[1].Value } |
-             Sort-Object -Descending | Select-Object -First 20
-    $PythonVersion = $null
+             Sort-Object -Descending | Select-Object -First 25
+    $ok = $null; $tried = 0
     foreach ($v in $cands) {
-        try { Invoke-WebRequest -UseBasicParsing -Method Head "https://www.python.org/ftp/python/$v/python-$v-embed-amd64.zip" | Out-Null; $PythonVersion = "$v"; break } catch {}
+        try { Invoke-WebRequest -UseBasicParsing -Method Head "https://www.python.org/ftp/python/$v/python-$v-embed-amd64.zip" | Out-Null } catch { continue }
+        $tried++
+        Step "Python $v embeddable"
+        if (Install-EmbeddedPython "$v") { $ok = "$v"; break }
+        Write-Warning "Python $v embeddable failed the smoke test - trying the previous release"
+        if ($tried -ge 4) { break }
     }
-    if (-not $PythonVersion) { throw 'could not resolve the latest Python embeddable version' }
+    if (-not $ok) { throw 'no working Python embeddable build found (tried the newest 4)' }
+    $PythonVersion = $ok
+} else {
+    Step "Python $PythonVersion embeddable"
+    if (-not (Install-EmbeddedPython $PythonVersion)) { throw "embedded python $PythonVersion does not run" }
 }
-Step "Python $PythonVersion embeddable"
-$pyZip = Join-Path $Dl "python-$PythonVersion-embed-amd64.zip"
-if (-not (Test-Path $pyZip)) {
-    Invoke-WebRequest -UseBasicParsing "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-embed-amd64.zip" -OutFile $pyZip
-}
-$pyDir = Join-Path $Stage 'python'
-Remove-Item $pyDir -Recurse -Force -ErrorAction SilentlyContinue
-Expand-Archive $pyZip $pyDir -Force
-# The ._pth file puts embeddable Python in isolated path mode: the running script's folder is
-# not importable, which breaks tools like SSDTTime (from Scripts import ...). Remove it.
-Get-ChildItem $pyDir -Filter 'python*._pth' | Remove-Item -Force
-$py = Join-Path $pyDir 'python.exe'
-& $py -c "import ssl, zipfile, plistlib, json, urllib.request; print('python ok', ssl.OPENSSL_VERSION)"
-if ($LASTEXITCODE -ne 0) { throw 'embedded python does not run' }
+Write-Host "Using Python $PythonVersion"
 
 Step 'CA certificate bundle (WinPE has no Windows root store updates)'
 $ca = Join-Path $Stage 'data\cacert.pem'

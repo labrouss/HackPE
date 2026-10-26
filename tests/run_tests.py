@@ -274,6 +274,29 @@ def main():
     po = json.loads(subprocess.run(eng + ["paths", "--json", "--target", "sonoma", "--hw", fb], capture_output=True, text=True, env=env).stdout)
     check(po["efi"] == os.path.join(pb, "efi", "sonoma") and po["pc"] == pb, "paths --json reports the PC's folders")
 
+    print("== embeddable Python stays isolated (._pth kept) + script-folder hook")
+    bld = open(os.path.join(HERE, "..", "Build-HackPE.ps1"), encoding="ascii").read()
+    check("'python*._pth' | Remove-Item" not in bld and "'import site'" in bld,
+          "build keeps the ._pth file (no registry/PYTHONPATH leaks from an installed Python)")
+    check("trying the previous release" in bld, "build falls back to the previous Python if the newest fails its smoke test")
+    hook = re.search(r"\$ScriptDirHook = '([^']+)'", bld).group(1)
+    base = tempfile.mkdtemp(prefix="hackpe-pyhook-")
+    henv = dict(os.environ, PYTHONUSERBASE=os.path.join(base, "ub"), PYTHONNOUSERSITE="")
+    henv.pop("PYTHONNOUSERSITE")
+    usite = subprocess.run([sys.executable, "-c", "import site; print(site.getusersitepackages())"],
+                           capture_output=True, text=True, env=henv).stdout.strip()
+    os.makedirs(usite, exist_ok=True)
+    open(os.path.join(usite, "hackpe_scriptdir.pth"), "w").write(hook + "\n")
+    sd = os.path.join(base, "tool"); os.makedirs(os.path.join(sd, "Scripts"))
+    open(os.path.join(sd, "Scripts", "__init__.py"), "w").close()
+    open(os.path.join(sd, "Scripts", "utils.py"), "w").write("OK = 1\n")
+    open(os.path.join(sd, "Tool.py"), "w").write("from Scripts import utils\nprint('hook-ok', utils.OK)\n")
+    if sys.version_info >= (3, 11):     # -P = do not add the script folder (what ._pth does)
+        r = subprocess.run([sys.executable, "-P", os.path.join(sd, "Tool.py")], capture_output=True, text=True, env=henv, cwd=base)
+        check("hook-ok 1" in r.stdout, "script-folder hook: 'from Scripts import ...' works like SSDTTime needs (%s)" % (r.stderr.strip()[-120:] or "ok"))
+    eng = open(os.path.join(HERE, "..", "engine", "hackpe.py")).read()
+    check('reconfigure(encoding="utf-8"' in eng, "engine forces UTF-8 output (PYTHONIOENCODING is ignored in isolated mode)")
+
     print("== HackPE Bar wiring")
     import inspect
     import tools as tools  # noqa: F811

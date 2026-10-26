@@ -61,7 +61,7 @@ git push -u origin main
 git tag v1.0.0 && git push origin v1.0.0        # -> release with the ISO
 ```
 
-**Always the latest:** every build resolves the newest OpenCore, kexts, apps and tools (no cache between runs). It also builds the newest stable embeddable Python, the latest ACPICA release (built from source) and the current Windows ADK.
+**Always the latest:** every build resolves the newest OpenCore, kexts, apps and tools (no cache between runs). It also uses the newest stable embeddable Python, the latest ACPICA release (built from source) and the current Windows ADK. If the newest Python fails the build's smoke test, the build falls back to the previous release automatically. The bundled Python runs isolated, so a Python installed on the build runner or on your own PC can't interfere with it.
 
 **Changelog:** each release gets generated notes:
 - a table of component upgrades (⬆️) and additions (🆕) compared with the previous release's `versions.json`

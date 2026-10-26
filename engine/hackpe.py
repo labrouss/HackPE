@@ -19,6 +19,14 @@ Python 3.8+ for the parts that do not touch disks).
 import argparse, datetime, glob, json, os, platform as pyplatform, plistlib, re, shutil, ssl
 import string, subprocess, sys, tempfile, time, urllib.request, urllib.error, uuid, zipfile
 
+# The bundled Python runs isolated (._pth), so PYTHONIOENCODING is ignored: force UTF-8 output ourselves
+# (the GUIs read job output from files/pipes, where Windows would otherwise use the ANSI code page).
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import hwdb  # noqa: E402
 import tools  # noqa: E402
