@@ -157,9 +157,9 @@ When HackPE boots, a **taskbar docked at the bottom of the screen** replaces the
 | **HackPE** | Assistant, Expert mode, text-mode wizard, hardware report, bundled versions, pre-flight check, update downloads, classic text menu |
 | **ACPI** | Dump ACPI tables, auto-generate SSDTs for this PC, SSDTTime (all options), view generated SSDTs/patches |
 | **USB** | USBToolBox port mapping, make a USB installer, add HackPE to a stick's OpenCore menu |
-| **EFI** | Rebuild EFI with SSDTs + USB map, OpCore-Simplify, Hardware-Sniffer, Ferramentas TOPS, OCAuxiliaryTools, ocvalidate, macserial, open an EFI partition |
+| **EFI** | Rebuild EFI with SSDTs + USB map, OpCore-Simplify, Hackintosh EFI Builder (window and console), Hardware-Sniffer, Ferramentas TOPS, OCAuxiliaryTools, ocvalidate, macserial, open an EFI partition |
 | **macOS** | Full offline installer (gibMacOS), gibMacOS interactive, USB installer, post-install EFI to the internal disk |
-| **Apps** | Explorer++, Notepad++, OCAuxiliaryTools, Command prompt, PowerShell, Git Bash, DiskPart, *Run a program…* (file picker) |
+| **Apps** | Explorer++, Notepad++, OCAuxiliaryTools, Hackintosh EFI Builder, Command prompt, PowerShell, Git Bash, DiskPart, *Run a program…* (file picker) |
 | **Your tools** | Everything in `\HackPE\tools` on the stick (refreshed every time the menu opens) |
 | **System** | Network status, Wi-Fi, load drivers from a folder (folder picker) or from `\HackPE\drivers` |
 | **Windows** | Switch between open windows (WinPE has no taskbar of its own) |
@@ -183,6 +183,7 @@ The classic text menu has option **`T  Tools`**. A single tool can also run by i
 | 6 | Rebuild the EFI. Generated SSDTs and the USB map are picked up automatically. Generated SSDTs replace the matching prebuilt ones; prebuilt ones fill any gaps (e.g. SSDT-CPUR on AMD). | `build-efi` |
 | 7 / 8 / 9 | ocvalidate · macserial · mount the EFI partition of any disk | `validate` |
 | X / E / O | **Explorer++** (file explorer) · **Notepad++** · **OCAuxiliaryTools** (config editor) | `app explorer\|notepad\|ocat` |
+| I / J | **[Hackintosh EFI Builder](https://github.com/yusufklncc/Hackintosh-for-All-Computers)** (MIT): an alternative EFI generator built from 179 device profiles. It can also download recovery and write the USB stick. **I** opens the window version; **J** runs the console version and passes it this PC's USB map and newest ACPI dump. Both save to `output\<PC>\efi-builder`. | `app efibuilder`, `tools --run j` |
 | W / L | **Wi-Fi connect** · **load drivers from a folder** | `wifi`, `load-drivers` |
 | R / T1… | **Run any program** (`.exe .py .cmd .bat .ps1`) · your own tools from `\HackPE\tools` on the stick or `tools/custom` in the repo | `run` |
 
@@ -204,6 +205,7 @@ Every tool saves its results in **one folder per PC**. It goes on the stick when
     usb\                    UTBMap.kext, usb.json, USBToolBox\ (its working copy), history\<time>\
     efi\tahoe\              EFI\, BUILD-NOTES.txt, plan.json   (+ tahoe.previous = the build before)
     opcore-simplify\<time>\ EFIs made with OpCore-Simplify
+    efi-builder\            Hackintosh EFI Builder: EFI\, machine.json (its working folder)
     logs\<time>-<command>.log   every USB creation, EFI build, download, SSDT run
   downloads\                tools downloaded by Ferramentas TOPS
 ```

@@ -296,6 +296,8 @@ $tools = @(
     @('File explorer (Explorer++)', { $null = Invoke-Engine @('app', 'explorer') }),
     @('Text editor (Notepad++)', { $null = Invoke-Engine @('app', 'notepad') }),
     @('OCAuxiliaryTools (OCAT)', { $null = Invoke-Engine @('app', 'ocat'); Write-Log 'OCAT started (if nothing appears, run OCAT on full Windows)' }),
+    @('Hackintosh EFI Builder', { $null = Invoke-Engine @('app', 'efibuilder'); Write-Log 'Hackintosh EFI Builder started (if nothing appears, use the console version)' }),
+    @('Hackintosh EFI Builder (console)', { Start-EngineConsole @('tools', '--run', 'j') 'Hackintosh EFI Builder' }),
     @('Tools menu (text mode)', { Start-EngineConsole @('tools') 'Tools' }),
     @('Dump ACPI tables', { Start-EngineConsole @('acpi-dump') 'ACPI dump' }),
     @('Auto-generate SSDTs', {

@@ -55,6 +55,7 @@ OUTPUT_KINDS = {
     "efi": "OpenCore EFI per macOS version (EFI\\, BUILD-NOTES.txt, plan.json); the previous build is kept as <target>.previous",
     "opcore-simplify": "EFIs made with OpCore-Simplify",
     "logs": "a log of every long job (USB creation, EFI builds, downloads)",
+    "efi-builder": "working folder of Hackintosh EFI Builder (what it saves without asking)",
 }
 _OUT = {}
 _GENERIC = re.compile(r"to be filled|system product name|system manufacturer|default string|not applicable|"
@@ -1092,7 +1093,11 @@ def run_usbtoolbox(cache):
 # Bundled Windows apps: Explorer++ (file explorer), Notepad++ (editor), OCAT (config editor)
 # ===========================================================================
 APPS = {"explorer": ("ExplorerPP", "Explorer++.exe"), "notepad": ("NotepadPP", "notepad++.exe"),
-        "ocat": ("OCAT", "OCAuxiliaryTools.exe")}
+        "ocat": ("OCAT", "OCAuxiliaryTools.exe"),
+        # Hackintosh EFI Builder (github.com/yusufklncc/Hackintosh-for-All-Computers) - GUI and console builds
+        "efibuilder": ("EFIBuilder", "HackintoshEFIBuilder.exe"),
+        "efibuilder-console": ("EFIBuilderConsole", "EFIBuilderEngine.exe")}
+APP_OUTPUT = {"efibuilder": "efi-builder", "efibuilder-console": "efi-builder"}   # start in output\<PC>\<kind>
 
 
 def app_path(cache, key):
@@ -1108,7 +1113,7 @@ def app_path(cache, key):
             base = os.path.join(work_dir(), "apps", pkg)
             with zipfile.ZipFile(cache.path(pkg)) as z:
                 z.extractall(base)
-        hits = glob.glob(os.path.join(base, "**", exe), recursive=True)
+        hits = sorted(glob.glob(os.path.join(base, "**", exe), recursive=True), key=len)   # shortest = main exe
     return hits[0] if hits else None
 
 
@@ -1127,8 +1132,29 @@ def launch_app(cache, key, args=None, wait=False):
         env["QT_OPENGL"] = "software"                # no GPU driver in WinPE -> bundled opengl32sw.dll
         env["QT_QPA_PLATFORM"] = "windows:darkmode=0"
     cmd = [exe] + (args or [])
+    cwd = os.path.dirname(exe) if os.path.isabs(exe) else None
+    if key in APP_OUTPUT:                       # files it saves without asking land in this PC's output folder
+        cwd = pc_dir(APP_OUTPUT[key])
+        log("Working folder: %s" % cwd)
     log("> %s" % " ".join(cmd))
-    return run_maximized(cmd, cwd=os.path.dirname(exe) if os.path.isabs(exe) else None, env=env, wait=wait)
+    return run_maximized(cmd, cwd=cwd, env=env, wait=wait)
+
+
+def run_efi_builder_console(cache):
+    """Console build of Hackintosh EFI Builder, fed with what HackPE already knows about this PC:
+    its EFI goes to output\\<PC>\\efi-builder\\EFI, plus this PC's USB map and ACPI dump when present."""
+    out = pc_dir("efi-builder")
+    args = ["--out", os.path.join(out, "EFI")]
+    usb = os.path.join(pc_dir("usb"), "UTBMap.kext")
+    if os.path.isdir(usb):
+        args += ["--usb-map", usb]
+        log("Using this PC's USB map: %s" % usb)
+    tables = latest_run("acpi", "*.aml")
+    if tables:
+        args += ["--acpi-tables", tables]
+        log("Using this PC's ACPI dump: %s" % tables)
+    log("Hackintosh EFI Builder (github.com/yusufklncc/Hackintosh-for-All-Computers) - EFI is saved to %s" % args[1])
+    return launch_app(cache, "efibuilder-console", args, wait=True)
 
 
 def edit_file(cache, path):
@@ -1395,6 +1421,12 @@ def tool_action(c, cache, engine, hwj=None, customs=None):
     elif c == "x":
         launch_app(cache, "explorer")
         return False
+    elif c == "i":
+        launch_app(cache, "efibuilder")
+        print("Hackintosh EFI Builder started (github.com/yusufklncc/Hackintosh-for-All-Computers).")
+        print("If no window appears, this WinPE lacks a library it needs - use the console build (J) instead.")
+    elif c == "j":
+        run_efi_builder_console(cache)
     elif c == "o":
         launch_app(cache, "ocat")
         print("OCAT started. If it does not appear, this PC/WinPE lacks a DLL it needs -")
@@ -1484,6 +1516,7 @@ def tools_menu(cache, engine):
         print("   Apps")
         print("    X  File explorer (Explorer++)       E  Text editor (Notepad++)")
         print("    O  OCAuxiliaryTools (config.plist editor / OpenCore updater)")
+        print("    I  Hackintosh EFI Builder - EFI from 179 device profiles, recovery, USB  (J = console build)")
         print("   System")
         print("    H  Hardware report         N  Network status       W  Wi-Fi connect")
         print("    L  Load drivers from a folder (.inf, e.g. touchpad / LAN / Wi-Fi)")

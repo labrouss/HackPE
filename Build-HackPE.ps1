@@ -160,7 +160,7 @@ if ($AcpicaDir) {
 }
 & $py (Join-Path $Stage 'engine\hackpe.py') --cache $Cache status
 
-Step 'Extracting bundled apps (Explorer++, Notepad++, OCAuxiliaryTools)'
+Step 'Extracting bundled apps (Explorer++, Notepad++, OCAuxiliaryTools, Hackintosh EFI Builder)'
 Remove-Item (Join-Path $Stage 'apps') -Recurse -Force -ErrorAction SilentlyContinue
 $appScript = "import sys; sys.path.insert(0, r'$Stage\engine'); import hackpe, tools; c = hackpe.Cache([r'$Cache']); [print(k, tools.app_path(c, k)) for k in tools.APPS]"
 & $py -c $appScript

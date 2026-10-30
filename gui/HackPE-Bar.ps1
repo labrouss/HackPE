@@ -236,6 +236,8 @@ $null = New-BarMenu 'EFI' @(
     'BUILD',
     @('Rebuild EFI with generated SSDTs + USB map', { Start-Tool '6' 'Rebuild EFI' }),
     @('OpCore-Simplify (alternative generator, online)', { Start-Tool 's' 'OpCore-Simplify' }),
+    @('Hackintosh EFI Builder (179 device profiles)', { Start-App 'efibuilder' }, 'EFI generator by yusufklncc - also downloads recovery and writes the USB stick'),
+    @('Hackintosh EFI Builder - console version', { Start-Tool 'j' 'Hackintosh EFI Builder' }, 'Text-mode build of the same tool - use it if the window version does not start in WinPE'),
     @('Hardware-Sniffer (report for OpCore-Simplify)', { Start-Tool 'k' 'Hardware-Sniffer' }),
     @('Ferramentas TOPS (tool collection, online)', { Start-Tool 'f' 'Ferramentas TOPS' }),
     '-',
@@ -256,6 +258,7 @@ $null = New-BarMenu 'macOS' @(
 $null = New-BarMenu 'Apps' @(
     @('File explorer  (Explorer++)', { Start-App 'explorer' }),
     @('Output folder of this PC', { Open-Output }),
+    @('Hackintosh EFI Builder', { Start-App 'efibuilder' }),
     @('Text editor  (Notepad++)', { Start-App 'notepad' }),
     @('OCAuxiliaryTools', { Start-App 'ocat' }),
     '-',

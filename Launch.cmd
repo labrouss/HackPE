@@ -64,7 +64,7 @@ echo    1  HackPE Assistant (guided, recommended)
 echo    E  Expert mode (all options)
 echo    2  Text-mode wizard (detect, build EFI, make USB)
 echo    T  Tools: ACPI dump, SSDT auto-generation, SSDTTime, USBToolBox,
-echo          OCAuxiliaryTools, drivers, Wi-Fi, run any program
+echo          OCAuxiliaryTools, Hackintosh EFI Builder, drivers, Wi-Fi, run any program
 echo    X  File explorer (Explorer++)       N  Text editor (Notepad++)
 echo    O  Output folder of this PC (hardware, ACPI, SSDTs, USB map, EFIs, logs)
 echo    3  Hardware report

@@ -297,6 +297,46 @@ def main():
     eng = open(os.path.join(HERE, "..", "engine", "hackpe.py")).read()
     check('reconfigure(encoding="utf-8"' in eng, "engine forces UTF-8 output (PYTHONIOENCODING is ignored in isolated mode)")
 
+    print("== Hackintosh EFI Builder (yusufklncc) package + launch")
+    import zipfile
+    import tools as _te
+    for pkg, name in (("EFIBuilder", "HackintoshEFIBuilder-win-x64.zip"), ("EFIBuilderConsole", "HackintoshEFIBuilder-console-win-x64.zip")):
+        check(re.search(hwdb.PACKAGES[pkg]["asset"], name), "%s matches its release asset %s" % (pkg, name))
+    zd = tempfile.mkdtemp(prefix="hackpe-efib-")
+    layouts = {"EFIBuilder": ["HackintoshEFIBuilder.exe", "EFIBuilderEngine/EFIBuilderEngine.exe", "EFIBuilderEngine/_internal/python313.dll"],
+               "EFIBuilderConsole": ["EFIBuilderEngine/EFIBuilderEngine.exe", "EFIBuilderEngine/_internal/python313.dll"]}
+    ec = hackpe.Cache([os.path.join(zd, "cache")])
+    for pkg, files in layouts.items():
+        zp = os.path.join(zd, pkg + ".zip")
+        with zipfile.ZipFile(zp, "w") as z:
+            for f in files:
+                z.writestr(f, "MZ")
+        ec.import_file(pkg, zp, tag="v1.0.7")
+    old_root = _te.ROOT
+    _te.ROOT = os.path.join(zd, "root")
+    try:
+        gui = _te.app_path(ec, "efibuilder")
+        con = _te.app_path(ec, "efibuilder-console")
+        check(gui and gui.endswith("HackintoshEFIBuilder.exe"), "GUI build found: %s" % gui)
+        check(con and con.replace("\\", "/").endswith("EFIBuilderEngine/EFIBuilderEngine.exe"), "console build found: %s" % con)
+        calls = []
+        real = _te.launch_app
+        _te.launch_app = lambda cache, key, args=None, wait=False: calls.append((key, args))
+        usb = os.path.join(_te.pc_dir("usb"), "UTBMap.kext")
+        os.makedirs(usb, exist_ok=True)
+        acpi = _te.pc_dir("acpi", sub="20990101-000000")
+        open(os.path.join(acpi, "DSDT.aml"), "wb").write(b"x")
+        _te.run_efi_builder_console(ec)
+        _te.launch_app = real
+        key, args = calls[0]
+        check(key == "efibuilder-console" and args[0] == "--out" and args[1].startswith(_te.pc_dir("efi-builder")),
+              "console build saves its EFI in output\\<PC>\\efi-builder")
+        check("--usb-map" in args and args[args.index("--usb-map") + 1] == usb, "console build gets this PC's UTBMap.kext")
+        check("--acpi-tables" in args and args[args.index("--acpi-tables") + 1] == acpi, "console build gets this PC's newest ACPI dump")
+        shutil.rmtree(os.path.dirname(usb)); shutil.rmtree(acpi)
+    finally:
+        _te.ROOT = old_root
+
     print("== HackPE Bar wiring")
     import inspect
     import tools as tools  # noqa: F811

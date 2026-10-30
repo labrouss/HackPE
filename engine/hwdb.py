@@ -419,6 +419,11 @@ PACKAGES = {
     "ExplorerPP":         dict(repo="derceg/explorerplusplus", asset=r"^explorerpp_x64\.zip$", app="Explorer++.exe"),
     "NotepadPP":          dict(repo="notepad-plus-plus/notepad-plus-plus", asset=r"^npp\.[\d.]+\.portable\.x64\.zip$", app="notepad++.exe"),
     "OCAT":               dict(repo="ic005k/OCAuxiliaryTools", asset=r"^OCAT-Win64\.zip$", app="OCAuxiliaryTools.exe"),
+    # Hackintosh EFI Builder (yusufklncc, MIT): profile-based EFI generator + recovery + USB writer
+    "EFIBuilder":         dict(repo="yusufklncc/Hackintosh-for-All-Computers", asset=r"^HackintoshEFIBuilder-win-x64\.zip$",
+                               app="HackintoshEFIBuilder.exe"),        # Avalonia window + EFIBuilderEngine
+    "EFIBuilderConsole":  dict(repo="yusufklncc/Hackintosh-for-All-Computers", asset=r"^HackintoshEFIBuilder-console-win-x64\.zip$",
+                               app="EFIBuilderEngine.exe"),            # the same engine, console only
     "ACPICA64_iasl":      dict(local=True, file="iasl.exe"),
     "ACPICA64_acpidump":  dict(local=True, file="acpidump.exe"),
     # direct files
